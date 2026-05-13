@@ -22,7 +22,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 
 import ccxt
@@ -85,6 +85,10 @@ TOP_N_LEVELS = int(os.getenv("TOP_N_LEVELS", "5"))
 
 # Задержка между анализом пар (сек) / Delay between pairs (sec)
 DELAY_BETWEEN_PAIRS = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
+
+# Интервал между полными прогонами (часы) / Interval between full runs (hours)
+# 0 = одноразовый запуск / 0 = run once and exit
+RUN_INTERVAL_HOURS = float(os.getenv("RUN_INTERVAL_HOURS", "2"))
 
 # ============================================================
 # ЛОГИРОВАНИЕ / LOGGING
@@ -470,6 +474,25 @@ async def analyze_pair(
 # ============================================================
 # MAIN
 # ============================================================
+async def run_once(client: ccxt.mexc, bot: Bot) -> None:
+    """
+    Один полный прогон по всем парам.
+    One full pass through all trading pairs.
+    """
+    for idx, pair in enumerate(TRADING_PAIRS):
+        try:
+            await analyze_pair(client, bot, pair)
+        except Exception as exc:
+            logger.error("Ошибка при анализе %s: %s", pair, exc)
+            await send_telegram_message(
+                bot,
+                f"❌ <b>{pair}</b>: ошибка анализа — <code>{exc}</code>",
+            )
+        # Небольшая пауза между парами, чтобы не упереться в rate limit
+        if idx < len(TRADING_PAIRS) - 1:
+            await asyncio.sleep(DELAY_BETWEEN_PAIRS)
+
+
 async def run() -> None:
     """Главная асинхронная функция."""
     validate_config()
@@ -482,7 +505,7 @@ async def run() -> None:
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-    # Стартовое сообщение
+    # Стартовое сообщение (отправляется один раз при старте)
     try:
         me = await bot.get_me()
         logger.info("Telegram бот: @%s", me.username)
@@ -490,28 +513,36 @@ async def run() -> None:
         logger.error("Не удалось подключиться к Telegram: %s", exc)
         return
 
+    interval_seconds = int(RUN_INTERVAL_HOURS * 3600)
+    mode = "одноразовый" if interval_seconds <= 0 else f"каждые {RUN_INTERVAL_HOURS}ч"
+
     start_msg = (
         f"🚀 <b>Signaler запущен</b>\n"
         f"Пар: {len(TRADING_PAIRS)}  •  TF: <code>{TIMEFRAME}</code>\n"
+        f"Режим: <b>{mode}</b>\n"
         f"Min touches: {MIN_TOUCHES}  •  Tolerance: {TOLERANCE_PERCENT}%"
     )
     await send_telegram_message(bot, start_msg)
 
-    # Анализируем каждую пару
-    for idx, pair in enumerate(TRADING_PAIRS):
-        try:
-            await analyze_pair(client, bot, pair)
-        except Exception as exc:
-            logger.error("Ошибка при анализе %s: %s", pair, exc)
-            await send_telegram_message(
-                bot,
-                f"❌ <b>{pair}</b>: ошибка анализа — <code>{exc}</code>",
-            )
-        # Небольшая пауза между парами, чтобы не упереться в rate limit
-        if idx < len(TRADING_PAIRS) - 1:
-            time.sleep(DELAY_BETWEEN_PAIRS)
+    # Основной цикл / Main loop
+    iteration = 0
+    while True:
+        iteration += 1
+        logger.info("========== Итерация #%d ==========", iteration)
 
-    logger.info("Готово.")
+        await run_once(client, bot)
+
+        if interval_seconds <= 0:
+            logger.info("Одноразовый режим — завершаюсь.")
+            break
+
+        next_run = datetime.utcnow() + timedelta(seconds=interval_seconds)
+        logger.info(
+            "Следующая итерация через %.1fч (в %s UTC)",
+            RUN_INTERVAL_HOURS,
+            next_run.strftime("%Y-%m-%d %H:%M"),
+        )
+        await asyncio.sleep(interval_seconds)
 
 
 def main() -> None:
