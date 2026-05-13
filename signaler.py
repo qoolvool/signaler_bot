@@ -69,16 +69,16 @@ TRADING_PAIRS = [
 TIMEFRAME = os.getenv("TIMEFRAME", "1h")
 
 # Количество свечей для анализа / Number of candles to analyze
-CANDLES_LIMIT = int(os.getenv("CANDLES_LIMIT", "200"))
+CANDLES_LIMIT = int(os.getenv("CANDLES_LIMIT", "150"))
 
 # Минимальное количество касаний уровня / Minimum touches for a valid level
-MIN_TOUCHES = int(os.getenv("MIN_TOUCHES", "3"))
+MIN_TOUCHES = int(os.getenv("MIN_TOUCHES", "4"))
 
 # Толерантность при поиске касаний (в процентах) / Touch tolerance (percent)
 TOLERANCE_PERCENT = float(os.getenv("TOLERANCE_PERCENT", "0.5"))
 
 # Размер окна для поиска локальных экстремумов / Local extrema window size
-EXTREMA_WINDOW = int(os.getenv("EXTREMA_WINDOW", "5"))
+EXTREMA_WINDOW = int(os.getenv("EXTREMA_WINDOW", "8"))
 
 # Топ N самых сильных уровней / Top N strongest levels
 TOP_N_LEVELS = int(os.getenv("TOP_N_LEVELS", "5"))
@@ -88,7 +88,7 @@ DELAY_BETWEEN_PAIRS = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
 
 # Интервал между полными прогонами (часы) / Interval between full runs (hours)
 # 0 = одноразовый запуск / 0 = run once and exit
-RUN_INTERVAL_HOURS = float(os.getenv("RUN_INTERVAL_HOURS", "2"))
+RUN_INTERVAL_HOURS = float(os.getenv("RUN_INTERVAL_HOURS", "1"))
 
 # ============================================================
 # ЛОГИРОВАНИЕ / LOGGING
