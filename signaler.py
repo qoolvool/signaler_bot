@@ -66,7 +66,7 @@ TRADING_PAIRS = [
 ]
 
 # Таймфрейм / Timeframe (1m, 5m, 15m, 1h, 4h, 1d, ...)
-TIMEFRAME = os.getenv("TIMEFRAME", "4h")
+TIMEFRAME = os.getenv("TIMEFRAME", "1h")
 
 # Количество свечей для анализа / Number of candles to analyze
 CANDLES_LIMIT = int(os.getenv("CANDLES_LIMIT", "200"))
