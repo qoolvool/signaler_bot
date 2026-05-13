@@ -72,10 +72,10 @@ TIMEFRAME = os.getenv("TIMEFRAME", "1h")
 CANDLES_LIMIT = int(os.getenv("CANDLES_LIMIT", "150"))
 
 # Минимальное количество касаний уровня / Minimum touches for a valid level
-MIN_TOUCHES = int(os.getenv("MIN_TOUCHES", "4"))
+MIN_TOUCHES = int(os.getenv("MIN_TOUCHES", "5"))
 
 # Толерантность при поиске касаний (в процентах) / Touch tolerance (percent)
-TOLERANCE_PERCENT = float(os.getenv("TOLERANCE_PERCENT", "0.5"))
+TOLERANCE_PERCENT = float(os.getenv("TOLERANCE_PERCENT", "0.8"))
 
 # Размер окна для поиска локальных экстремумов / Local extrema window size
 EXTREMA_WINDOW = int(os.getenv("EXTREMA_WINDOW", "8"))
