@@ -623,7 +623,7 @@ def fmt_pending_triggered(trade: Dict, balance: float) -> str:
         f"{de} <b>{trade['pair']}</b>  •  {trade['direction']}\n"
         f"━━━━━━━━━━━━━━\n"
         f"Цена коснулась уровня: <b>{_fp(trade['entry_price'])}</b>\n"
-        f"SL: <b>{_fp(trade['sl'])}</b>  •  TP: <b>{_fp(trade['tp'])}</b>\n"
+        f"SL: <b>{_fp(trade['sl'])}</b>  (-{trade['risk_pct']}%)  •  TP: <b>{_fp(trade['tp'])}</b>  (+{trade['reward_pct']}%)\n"
         f"Equity: ${balance:,.2f}"
     )
 
@@ -706,7 +706,8 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
             pnl_line = ""
         lines.append(
             f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}\n"
-            f"   Вход: {_fp(t['entry_price'])}  SL: {_fp(t['sl'])}  TP: {_fp(t['tp'])}"
+            f"   Вход: {_fp(t['entry_price'])}\n"
+            f"   SL: {_fp(t['sl'])}  (-{t['risk_pct']}%)  •  TP: {_fp(t['tp'])}  (+{t['reward_pct']}%)"
             f"{pnl_line}"
         )
 
@@ -716,7 +717,8 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
             de = "📈" if o["direction"] == "LONG" else "📉"
             lines.append(
                 f"{de} <b>#{o['id']}</b> {o['pair']}  •  {o['direction']}\n"
-                f"   Лимит: {_fp(o['entry_price'])}  •  Осталось проверок: {o['checks_remaining']}"
+                f"   Лимит: {_fp(o['entry_price'])}  "
+                f"SL: {_fp(o['sl'])}  (-{o['risk_pct']}%)  •  TP: {_fp(o['tp'])}  (+{o['reward_pct']}%)"
             )
 
     return "\n".join(lines)
