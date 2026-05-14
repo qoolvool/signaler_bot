@@ -267,9 +267,11 @@ class PaperPortfolio:
                 trade = self._make_trade(order)
                 self.trades.append(trade)
                 triggered.append(trade)
+                self.balance = round(self.balance - trade["size_usd"], 2)
                 logger.info(
-                    "Ордер #%s исполнен: %s %s @ %.6f",
+                    "Ордер #%s исполнен: %s %s @ %.6f | маржа -$%.2f | баланс $%.2f",
                     trade["id"], trade["direction"], trade["pair"], trade["entry_price"],
+                    trade["size_usd"], self.balance,
                 )
             elif order["checks_remaining"] <= 0:
                 cancelled.append(order)
@@ -347,12 +349,12 @@ class PaperPortfolio:
             status="CLOSED", closed_at=_utcnow(), close_price=close_price,
             close_reason=reason, pnl_usd=round(pnl, 2), pnl_percent=round(pnl_pct, 2),
         )
-        self.balance = round(self.balance + pnl, 2)
+        self.balance = round(self.balance + trade["size_usd"] + pnl, 2)
         self._save()
         logger.info(
-            "Закрыта #%s %s %s: %s @ %.6f | PnL $%.2f (%.2f%%)",
+            "Закрыта #%s %s %s: %s @ %.6f | PnL $%.2f (%.2f%%) | баланс $%.2f",
             trade["id"], trade["direction"], trade["pair"],
-            reason, close_price, pnl, pnl_pct,
+            reason, close_price, pnl, pnl_pct, self.balance,
         )
         return trade
 
