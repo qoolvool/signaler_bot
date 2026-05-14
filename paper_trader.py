@@ -1,7 +1,7 @@
 """
 Paper trading simulation engine.
-Tracks a virtual portfolio without placing real exchange orders.
-Persists state to trades.json and portfolio.json.
+Pending (limit) orders wait for price to touch the entry level before opening.
+State persists in trades.json and portfolio.json.
 """
 
 import json
@@ -9,12 +9,12 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("signaler.paper")
 
 _BASE = Path(__file__).parent
-TRADES_FILE = _BASE / "trades.json"
+TRADES_FILE    = _BASE / "trades.json"
 PORTFOLIO_FILE = _BASE / "portfolio.json"
 
 
@@ -24,12 +24,15 @@ class PaperPortfolio:
         initial_balance: float = 1000.0,
         trade_size_percent: float = 2.0,
         max_open_trades: int = 5,
+        pending_expiry_checks: int = 8,   # cancel pending order after N checks without trigger
     ):
-        self.initial_balance = initial_balance
-        self.trade_size_percent = trade_size_percent
-        self.max_open_trades = max_open_trades
-        self.balance: float = initial_balance
-        self.trades: List[Dict] = []
+        self.initial_balance       = initial_balance
+        self.trade_size_percent    = trade_size_percent
+        self.max_open_trades       = max_open_trades
+        self.pending_expiry_checks = pending_expiry_checks
+        self.balance: float        = initial_balance
+        self.trades: List[Dict]    = []
+        self.pending_orders: List[Dict] = []
         self._load()
 
     # ── persistence ───────────────────────────────────────────────────────────
@@ -38,8 +41,9 @@ class PaperPortfolio:
         if PORTFOLIO_FILE.exists():
             try:
                 data = json.loads(PORTFOLIO_FILE.read_text(encoding="utf-8"))
-                self.balance = data.get("balance", self.initial_balance)
+                self.balance        = data.get("balance",         self.initial_balance)
                 self.initial_balance = data.get("initial_balance", self.initial_balance)
+                self.pending_orders  = data.get("pending_orders",  [])
             except Exception as exc:
                 logger.error("Ошибка чтения portfolio.json: %s", exc)
 
@@ -54,12 +58,12 @@ class PaperPortfolio:
             PORTFOLIO_FILE.write_text(
                 json.dumps(
                     {
-                        "balance": self.balance,
-                        "initial_balance": self.initial_balance,
-                        "updated_at": _utcnow(),
+                        "balance":          self.balance,
+                        "initial_balance":  self.initial_balance,
+                        "pending_orders":   self.pending_orders,
+                        "updated_at":       _utcnow(),
                     },
-                    indent=2,
-                    ensure_ascii=False,
+                    indent=2, ensure_ascii=False,
                 ),
                 encoding="utf-8",
             )
@@ -86,58 +90,134 @@ class PaperPortfolio:
             for t in self.open_trades
         )
 
-    # ── trade lifecycle ───────────────────────────────────────────────────────
+    def has_pending_order(self, pair: str, direction: str) -> bool:
+        return any(
+            o["pair"] == pair and o["direction"] == direction
+            for o in self.pending_orders
+        )
 
-    def open_trade(
+    # ── pending (limit) orders ────────────────────────────────────────────────
+
+    def create_pending_order(
         self,
         pair: str,
         direction: str,
-        entry_price: float,
+        entry_price: float,  # exact level price
         sl: float,
         tp: float,
     ) -> Optional[Dict]:
-        """Open a paper trade. Returns the trade dict or None if rejected."""
+        """Place a limit order at entry_price. Activates when price touches the level."""
+        if self.has_pending_order(pair, direction):
+            logger.info("Ордер %s %s уже ожидает.", direction, pair)
+            return None
         if self.has_open_trade(pair, direction):
-            logger.info("Позиция %s %s уже открыта — пропускаем.", direction, pair)
+            logger.info("Позиция %s %s уже открыта.", direction, pair)
             return None
-        if len(self.open_trades) >= self.max_open_trades:
-            logger.info("Лимит открытых сделок (%d) достигнут.", self.max_open_trades)
-            return None
-
-        size_usd = round(self.balance * self.trade_size_percent / 100.0, 2)
-        if size_usd <= 0:
+        active = len(self.open_trades) + len(self.pending_orders)
+        if active >= self.max_open_trades:
+            logger.info("Лимит позиций (%d) достигнут.", self.max_open_trades)
             return None
 
-        risk_pct = round(abs(entry_price - sl) / entry_price * 100, 2)
+        size_usd   = round(self.balance * self.trade_size_percent / 100.0, 2)
+        risk_pct   = round(abs(entry_price - sl) / entry_price * 100, 2)
         reward_pct = round(abs(tp - entry_price) / entry_price * 100, 2)
-        rr = round(reward_pct / risk_pct, 1) if risk_pct > 0 else None
+        rr         = round(reward_pct / risk_pct, 1) if risk_pct > 0 else None
 
-        trade: Dict = {
-            "id": str(uuid.uuid4())[:8].upper(),
-            "pair": pair,
-            "direction": direction,
-            "entry_price": entry_price,
-            "sl": sl,
-            "tp": tp,
-            "size_usd": size_usd,
-            "risk_pct": risk_pct,
-            "reward_pct": reward_pct,
-            "rr": rr,
-            "opened_at": _utcnow(),
-            "closed_at": None,
-            "close_price": None,
-            "close_reason": None,
-            "pnl_usd": None,
-            "pnl_percent": None,
-            "status": "OPEN",
+        order: Dict = {
+            "id":               str(uuid.uuid4())[:8].upper(),
+            "pair":             pair,
+            "direction":        direction,
+            "entry_price":      entry_price,
+            "sl":               sl,
+            "tp":               tp,
+            "size_usd":         size_usd,
+            "risk_pct":         risk_pct,
+            "reward_pct":       reward_pct,
+            "rr":               rr,
+            "created_at":       _utcnow(),
+            "checks_remaining": self.pending_expiry_checks,
         }
-        self.trades.append(trade)
+        self.pending_orders.append(order)
         self._save()
         logger.info(
-            "Открыта #%s %s %s @ %.6f | SL %.6f | TP %.6f | $%.2f",
-            trade["id"], direction, pair, entry_price, sl, tp, size_usd,
+            "Ордер #%s %s %s @ %.6f | SL %.6f | TP %.6f | $%.2f",
+            order["id"], direction, pair, entry_price, sl, tp, size_usd,
         )
-        return trade
+        return order
+
+    def check_pending_orders(
+        self,
+        pair: str,
+        candle_high: float,
+        candle_low: float,
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Check if any pending order for this pair was triggered by the candle.
+        LONG triggered when candle_low  <= entry_price  (limit buy filled)
+        SHORT triggered when candle_high >= entry_price  (limit sell filled)
+        Returns (triggered_trades, cancelled_orders).
+        """
+        triggered: List[Dict] = []
+        cancelled: List[Dict] = []
+        remaining: List[Dict] = []
+
+        for order in self.pending_orders:
+            if order["pair"] != pair:
+                remaining.append(order)
+                continue
+
+            order["checks_remaining"] -= 1
+
+            hit = (
+                order["direction"] == "LONG"  and candle_low  <= order["entry_price"] or
+                order["direction"] == "SHORT" and candle_high >= order["entry_price"]
+            )
+
+            if hit:
+                trade = self._make_trade(order)
+                self.trades.append(trade)
+                triggered.append(trade)
+                logger.info(
+                    "Ордер #%s исполнен: %s %s @ %.6f",
+                    trade["id"], trade["direction"], trade["pair"], trade["entry_price"],
+                )
+            elif order["checks_remaining"] <= 0:
+                cancelled.append(order)
+                logger.info(
+                    "Ордер #%s отменён (истёк): %s %s @ %.6f",
+                    order["id"], order["direction"], order["pair"], order["entry_price"],
+                )
+            else:
+                remaining.append(order)
+
+        self.pending_orders = remaining
+        if triggered or cancelled:
+            self._save()
+
+        return triggered, cancelled
+
+    def _make_trade(self, order: Dict) -> Dict:
+        return {
+            "id":           order["id"],
+            "pair":         order["pair"],
+            "direction":    order["direction"],
+            "entry_price":  order["entry_price"],
+            "sl":           order["sl"],
+            "tp":           order["tp"],
+            "size_usd":     order["size_usd"],
+            "risk_pct":     order["risk_pct"],
+            "reward_pct":   order["reward_pct"],
+            "rr":           order["rr"],
+            "opened_at":    _utcnow(),
+            "closed_at":    None,
+            "close_price":  None,
+            "close_reason": None,
+            "pnl_usd":      None,
+            "pnl_percent":  None,
+            "status":       "OPEN",
+        }
+
+    # ── SL / TP ───────────────────────────────────────────────────────────────
 
     def check_sl_tp(
         self,
@@ -145,23 +225,18 @@ class PaperPortfolio:
         candle_high: float,
         candle_low: float,
     ) -> List[Dict]:
-        """Check open trades for this pair against a candle high/low.
-        Returns list of trades that were closed."""
+        """Check open trades for this pair against candle high/low. Returns closed trades."""
         closed = []
         for trade in list(self.open_trades):
             if trade["pair"] != pair:
                 continue
             close_price, reason = None, None
             if trade["direction"] == "LONG":
-                if candle_low <= trade["sl"]:
-                    close_price, reason = trade["sl"], "SL"
-                elif candle_high >= trade["tp"]:
-                    close_price, reason = trade["tp"], "TP"
-            else:  # SHORT
-                if candle_high >= trade["sl"]:
-                    close_price, reason = trade["sl"], "SL"
-                elif candle_low <= trade["tp"]:
-                    close_price, reason = trade["tp"], "TP"
+                if candle_low  <= trade["sl"]: close_price, reason = trade["sl"], "SL"
+                elif candle_high >= trade["tp"]: close_price, reason = trade["tp"], "TP"
+            else:
+                if candle_high >= trade["sl"]: close_price, reason = trade["sl"], "SL"
+                elif candle_low  <= trade["tp"]: close_price, reason = trade["tp"], "TP"
             if close_price is not None:
                 closed.append(self._close_trade(trade, close_price, reason))
         return closed
@@ -172,14 +247,9 @@ class PaperPortfolio:
         else:
             pnl = (trade["entry_price"] - close_price) / trade["entry_price"] * trade["size_usd"]
         pnl_pct = pnl / trade["size_usd"] * 100
-
         trade.update(
-            status="CLOSED",
-            closed_at=_utcnow(),
-            close_price=close_price,
-            close_reason=reason,
-            pnl_usd=round(pnl, 2),
-            pnl_percent=round(pnl_pct, 2),
+            status="CLOSED", closed_at=_utcnow(), close_price=close_price,
+            close_reason=reason, pnl_usd=round(pnl, 2), pnl_percent=round(pnl_pct, 2),
         )
         self.balance = round(self.balance + pnl, 2)
         self._save()
@@ -193,26 +263,27 @@ class PaperPortfolio:
     # ── statistics ────────────────────────────────────────────────────────────
 
     def get_stats(self) -> Dict:
-        closed = self.closed_trades
-        wins = [t for t in closed if (t["pnl_usd"] or 0) > 0]
-        losses = [t for t in closed if (t["pnl_usd"] or 0) <= 0]
+        closed   = self.closed_trades
+        wins     = [t for t in closed if (t["pnl_usd"] or 0) > 0]
+        losses   = [t for t in closed if (t["pnl_usd"] or 0) <= 0]
         total_pnl = sum(t["pnl_usd"] or 0 for t in closed)
-        winrate = len(wins) / len(closed) * 100 if closed else 0.0
-        bal_change = (self.balance - self.initial_balance) / self.initial_balance * 100
-        best = max(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
+        winrate  = len(wins) / len(closed) * 100 if closed else 0.0
+        bal_chg  = (self.balance - self.initial_balance) / self.initial_balance * 100
+        best  = max(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
         worst = min(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
         return {
-            "balance": self.balance,
-            "initial_balance": self.initial_balance,
-            "balance_change_pct": round(bal_change, 2),
-            "open_count": len(self.open_trades),
-            "total_closed": len(closed),
-            "wins": len(wins),
-            "losses": len(losses),
-            "winrate": round(winrate, 1),
-            "total_pnl": round(total_pnl, 2),
-            "best": best,
-            "worst": worst,
+            "balance":           self.balance,
+            "initial_balance":   self.initial_balance,
+            "balance_change_pct": round(bal_chg, 2),
+            "open_count":        len(self.open_trades),
+            "pending_count":     len(self.pending_orders),
+            "total_closed":      len(closed),
+            "wins":              len(wins),
+            "losses":            len(losses),
+            "winrate":           round(winrate, 1),
+            "total_pnl":         round(total_pnl, 2),
+            "best":              best,
+            "worst":             worst,
         }
 
     def recent_trades(self, n: int = 10) -> List[Dict]:

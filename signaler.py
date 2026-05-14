@@ -75,9 +75,10 @@ DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
 RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.5"))
 
 # --- Paper trading ---
-INITIAL_BALANCE      = float(os.getenv("INITIAL_BALANCE", "1000"))
-TRADE_SIZE_PERCENT   = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
-MAX_OPEN_TRADES      = int(os.getenv("MAX_OPEN_TRADES", "5"))
+INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
+TRADE_SIZE_PERCENT     = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
+MAX_OPEN_TRADES        = int(os.getenv("MAX_OPEN_TRADES", "5"))
+PENDING_EXPIRY_CHECKS  = int(os.getenv("PENDING_EXPIRY_CHECKS", "8"))  # ~4h at 30min interval
 
 
 # ============================================================
@@ -99,6 +100,7 @@ portfolio = PaperPortfolio(
     initial_balance=INITIAL_BALANCE,
     trade_size_percent=TRADE_SIZE_PERCENT,
     max_open_trades=MAX_OPEN_TRADES,
+    pending_expiry_checks=PENDING_EXPIRY_CHECKS,
 )
 
 
@@ -517,6 +519,43 @@ def fmt_trade_closed(trade: Dict, balance: float) -> str:
     )
 
 
+def fmt_pending_created(order: Dict) -> str:
+    de  = "📈" if order["direction"] == "LONG" else "📉"
+    rr  = f"  •  R:R 1:{order['rr']}" if order["rr"] else ""
+    chk = order["checks_remaining"]
+    return (
+        f"⏳ <b>ЛИМИТНЫЙ ОРДЕР #{order['id']}</b>\n"
+        f"{de} <b>{order['pair']}</b>  •  {order['direction']}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Вход (лимит): <b>{_fp(order['entry_price'])}</b>\n"
+        f"SL: <b>{_fp(order['sl'])}</b>  (-{order['risk_pct']}%)\n"
+        f"TP: <b>{_fp(order['tp'])}</b>  (+{order['reward_pct']}%){rr}\n"
+        f"Размер: <b>${order['size_usd']}</b>\n"
+        f"<i>Ждём касания уровня... (до {chk} проверок)</i>"
+    )
+
+
+def fmt_pending_triggered(trade: Dict, balance: float) -> str:
+    de = "📈" if trade["direction"] == "LONG" else "📉"
+    return (
+        f"✅ <b>ОРДЕР ИСПОЛНЕН #{trade['id']}</b>\n"
+        f"{de} <b>{trade['pair']}</b>  •  {trade['direction']}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Цена коснулась уровня: <b>{_fp(trade['entry_price'])}</b>\n"
+        f"SL: <b>{_fp(trade['sl'])}</b>  •  TP: <b>{_fp(trade['tp'])}</b>\n"
+        f"Баланс: ${balance:,.2f}"
+    )
+
+
+def fmt_pending_cancelled(order: Dict) -> str:
+    de = "📈" if order["direction"] == "LONG" else "📉"
+    return (
+        f"🗑 <b>ОРДЕР ОТМЕНЁН #{order['id']}</b>\n"
+        f"{de} {order['pair']}  •  {order['direction']}\n"
+        f"<i>Цена не коснулась {_fp(order['entry_price'])} за отведённое время</i>"
+    )
+
+
 def fmt_stats(ptf: PaperPortfolio) -> str:
     s    = ptf.get_stats()
     sign = "+" if s["balance_change_pct"] >= 0 else ""
@@ -525,7 +564,7 @@ def fmt_stats(ptf: PaperPortfolio) -> str:
         "📊 <b>СТАТИСТИКА ПОРТФЕЛЯ</b>", "",
         f"💰 Баланс: <b>${s['balance']:,.2f}</b>  ({sign}{s['balance_change_pct']}%)",
         f"🏦 Начальный: ${s['initial_balance']:,.2f}",
-        f"📂 Открытых позиций: <b>{s['open_count']}</b>", "",
+        f"📂 Открытых: <b>{s['open_count']}</b>  •  ⏳ Ожидающих: <b>{s['pending_count']}</b>", "",
         f"📈 Всего закрыто: <b>{s['total_closed']}</b>",
         f"  ✅ Прибыльных: <b>{s['wins']}</b>  ({s['winrate']}% winrate)",
         f"  ❌ Убыточных:  <b>{s['losses']}</b>", "",
@@ -578,31 +617,40 @@ async def analyze_pair(
 
     current_price = float(df["close"].iloc[-1])
 
-    # 1. Проверяем SL/TP по последней ЗАВЕРШЁННОЙ свече
-    last = df.iloc[-2]
-    for trade in portfolio.check_sl_tp(pair, float(last["high"]), float(last["low"])):
+    last = df.iloc[-2]  # последняя ЗАВЕРШЁННАЯ свеча
+    h, l = float(last["high"]), float(last["low"])
+
+    # 1. Закрытие открытых сделок по SL/TP
+    for trade in portfolio.check_sl_tp(pair, h, l):
         await send_msg(bot, fmt_trade_closed(trade, portfolio.balance))
 
-    # 2. Уровни и сигналы
+    # 2. Проверка ожидающих ордеров — коснулась ли цена уровня
+    triggered, cancelled = portfolio.check_pending_orders(pair, h, l)
+    for trade in triggered:
+        await send_msg(bot, fmt_pending_triggered(trade, portfolio.balance))
+    for order in cancelled:
+        await send_msg(bot, fmt_pending_cancelled(order))
+
+    # 3. Уровни и сигналы
     levels  = find_support_resistance(df)
     signals = find_entry_signals(df, levels, current_price)
 
-    # 3. Аналитическое сообщение
+    # 4. Аналитическое сообщение
     await send_msg(bot, fmt_analysis(pair, TIMEFRAME, current_price, levels, signals))
 
-    # 4. Открываем сделки по сигналам (только если есть TP)
+    # 5. Размещаем лимитные ордера на точной цене уровня
     for sig in signals:
         if sig["tp"] is None:
             continue
-        trade = portfolio.open_trade(
+        order = portfolio.create_pending_order(
             pair=pair,
             direction=sig["direction"],
-            entry_price=current_price,
+            entry_price=sig["level"]["price"],  # точная цена уровня, не текущая
             sl=sig["sl"],
             tp=sig["tp"],
         )
-        if trade:
-            await send_msg(bot, fmt_trade_opened(trade, portfolio.balance))
+        if order:
+            await send_msg(bot, fmt_pending_created(order))
 
 
 # ============================================================
