@@ -64,6 +64,7 @@ TRADING_PAIRS = [
 ]
 
 TIMEFRAME             = os.getenv("TIMEFRAME", "1h")
+CHECK_TIMEFRAME       = os.getenv("CHECK_TIMEFRAME", "5m")   # для проверки ордеров и SL/TP
 CANDLES_LIMIT         = int(os.getenv("CANDLES_LIMIT", "250"))
 MIN_TOUCHES           = int(os.getenv("MIN_TOUCHES", "3"))
 TOLERANCE_PERCENT     = float(os.getenv("TOLERANCE_PERCENT", "0.8"))
@@ -687,6 +688,15 @@ async def analyze_pair(
 ) -> None:
     logger.info("Анализ: %s", pair)
 
+    # Короткий TF для проверки ордеров и SL/TP (свежее касание цены)
+    df_check = fetch_ohlcv(client, pair, CHECK_TIMEFRAME, 3)
+    if df_check is not None and len(df_check) >= 2:
+        last_check = df_check.iloc[-2]
+    else:
+        # фоллбэк: загрузим основной TF ниже и возьмём его свечу
+        last_check = None
+
+    # Основной TF для анализа уровней и сигналов
     df = fetch_ohlcv(client, pair, TIMEFRAME, CANDLES_LIMIT)
     if df is None or df.empty:
         logger.warning("Пропускаем %s (нет данных)", pair)
@@ -694,8 +704,9 @@ async def analyze_pair(
 
     current_price = float(df["close"].iloc[-1])
 
-    last = df.iloc[-2]  # последняя ЗАВЕРШЁННАЯ свеча
-    h, l = float(last["high"]), float(last["low"])
+    if last_check is None:
+        last_check = df.iloc[-2]
+    h, l = float(last_check["high"]), float(last_check["low"])
 
     # 1. Закрытие открытых сделок по SL/TP
     for trade in portfolio.check_sl_tp(pair, h, l):
