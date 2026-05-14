@@ -308,6 +308,11 @@ class PaperPortfolio:
             "status":       "OPEN",
         }
 
+    def cancel_order(self, order: Dict) -> None:
+        self.pending_orders = [o for o in self.pending_orders if o["id"] != order["id"]]
+        self._save()
+        logger.info("Ордер #%s отменён: %s %s", order["id"], order["direction"], order["pair"])
+
     # ── SL / TP ───────────────────────────────────────────────────────────────
 
     def check_sl_tp(
