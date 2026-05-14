@@ -690,7 +690,7 @@ async def analyze_pair(
     logger.info("Анализ: %s", pair)
 
     # Короткий TF для проверки ордеров и SL/TP — берём обе свечи (завершённую и текущую)
-    df_check = fetch_ohlcv(client, pair, CHECK_TIMEFRAME, 3)
+    df_check = fetch_ohlcv(client, pair, CHECK_TIMEFRAME, 2)
     if df_check is not None and len(df_check) >= 2:
         h = max(float(df_check["high"].iloc[-2]), float(df_check["high"].iloc[-1]))
         l = min(float(df_check["low"].iloc[-2]),  float(df_check["low"].iloc[-1]))
