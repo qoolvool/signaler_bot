@@ -227,7 +227,7 @@ class PaperPortfolio:
         if self.has_open_trade(pair, direction):
             logger.info("Позиция %s %s уже открыта.", direction, pair)
             return None
-        if len(self.open_trades) + len(self.pending_orders) >= self.max_open_trades:
+        if self.max_open_trades > 0 and len(self.open_trades) + len(self.pending_orders) >= self.max_open_trades:
             logger.info("Лимит позиций (%d) достигнут.", self.max_open_trades)
             return None
 
