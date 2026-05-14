@@ -359,12 +359,20 @@ class PaperPortfolio:
         return closed
 
     def _close_trade(self, trade: Dict, close_price: float, reason: str) -> Dict:
-        notional = trade.get("notional", trade["size_usd"])
+        notional   = trade.get("notional", trade["size_usd"])
+        entry      = trade["entry_price"]
+        size_usd   = trade["size_usd"]
+        if not entry or not size_usd:
+            logger.error(
+                "Сделка #%s имеет entry_price=%s size_usd=%s — пропуск закрытия",
+                trade["id"], entry, size_usd,
+            )
+            return trade
         if trade["direction"] == "LONG":
-            pnl = (close_price - trade["entry_price"]) / trade["entry_price"] * notional
+            pnl = (close_price - entry) / entry * notional
         else:
-            pnl = (trade["entry_price"] - close_price) / trade["entry_price"] * notional
-        pnl_pct = pnl / trade["size_usd"] * 100
+            pnl = (entry - close_price) / entry * notional
+        pnl_pct = pnl / size_usd * 100
         trade.update(
             status="CLOSED", closed_at=_utcnow(), close_price=close_price,
             close_reason=reason, pnl_usd=round(pnl, 2), pnl_percent=round(pnl_pct, 2),

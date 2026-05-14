@@ -80,7 +80,9 @@ EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
 AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "0"))
 ATR_PERIOD              = int(os.getenv("ATR_PERIOD",   "14"))   # период ATR
 SL_ATR_MULT             = float(os.getenv("SL_ATR_MULT",   "1.5"))  # SL = entry ± ATR × mult
-TP_ATR_MIN_MULT         = float(os.getenv("TP_ATR_MIN_MULT", "2.0"))  # TP не ближе ATR × mult
+# TP_ATR_MIN_MULT должен быть >= SL_ATR_MULT × MIN_RR, иначе фоллбэк не пройдёт MIN_RR фильтр
+# По умолчанию: 1.5 × 1.5 = 2.25 → ставим 2.5 для небольшого запаса
+TP_ATR_MIN_MULT         = float(os.getenv("TP_ATR_MIN_MULT", "2.5"))  # TP не ближе ATR × mult
 MIN_RR                  = float(os.getenv("MIN_RR",         "1.5"))  # пропустить если R:R < этого
 
 DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
@@ -410,20 +412,30 @@ def find_entry_signals(
 
         if direction == "LONG":
             sl = entry - sl_dist
-            # ближайшее сопротивление выше entry, минимум на tp_min выше
-            candidates = [
-                l for l in levels
-                if l["type"] == "RESISTANCE" and l["price"] >= entry + tp_min
-            ]
-            tp = min(candidates, key=lambda x: x["price"])["price"] if candidates else entry + tp_min
+            above = sorted(
+                [l for l in levels if l["type"] == "RESISTANCE" and l["price"] > entry],
+                key=lambda x: x["price"],
+            )
+            if above:
+                nearest = above[0]["price"]
+                if nearest < entry + tp_min:
+                    continue  # ближайшее сопротивление слишком близко — заблокирует TP
+                tp = nearest
+            else:
+                tp = entry + tp_min  # нет сопротивлений — ATR-фоллбэк
         else:
             sl = entry + sl_dist
-            # ближайшая поддержка ниже entry, минимум на tp_min ниже
-            candidates = [
-                l for l in levels
-                if l["type"] == "SUPPORT" and l["price"] <= entry - tp_min
-            ]
-            tp = max(candidates, key=lambda x: x["price"])["price"] if candidates else entry - tp_min
+            below = sorted(
+                [l for l in levels if l["type"] == "SUPPORT" and l["price"] < entry],
+                key=lambda x: x["price"], reverse=True,
+            )
+            if below:
+                nearest = below[0]["price"]
+                if nearest > entry - tp_min:
+                    continue  # ближайшая поддержка слишком близко — заблокирует TP
+                tp = nearest
+            else:
+                tp = entry - tp_min  # нет поддержек — ATR-фоллбэк
 
         tp_dist    = abs(tp - entry)
         rr         = round(tp_dist / sl_dist, 1) if sl_dist > 0 else None
