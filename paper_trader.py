@@ -16,6 +16,7 @@ logger = logging.getLogger("signaler.paper")
 _BASE          = Path(os.getenv("DATA_DIR", str(Path(__file__).parent)))
 TRADES_FILE    = _BASE / "trades.json"
 PORTFOLIO_FILE = _BASE / "portfolio.json"
+REPORTS_FILE   = _BASE / "reports.json"
 
 try:
     from pymongo import MongoClient
@@ -44,6 +45,8 @@ class PaperPortfolio:
 
         self._col_portfolio = None
         self._col_trades    = None
+        self._col_reports   = None
+        self.reports: Dict[str, Dict] = {}
         self._connect_mongo()
         self._load()
 
@@ -62,6 +65,7 @@ class PaperPortfolio:
             db = client["signaler_bot"]
             self._col_portfolio = db["portfolio"]
             self._col_trades    = db["trades"]
+            self._col_reports   = db["reports"]
             logger.info("MongoDB Atlas подключён ✓")
         except Exception as exc:
             logger.error("MongoDB недоступен, использую файлы: %s", exc)
@@ -135,6 +139,11 @@ class PaperPortfolio:
                 self.trades = json.loads(TRADES_FILE.read_text(encoding="utf-8"))
             except Exception as exc:
                 logger.error("Ошибка чтения trades.json: %s", exc)
+        if REPORTS_FILE.exists():
+            try:
+                self.reports = json.loads(REPORTS_FILE.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.error("Ошибка чтения reports.json: %s", exc)
 
     def _save_files(self) -> None:
         try:
@@ -334,6 +343,34 @@ class PaperPortfolio:
             reason, close_price, pnl, pnl_pct,
         )
         return trade
+
+    # ── reports ───────────────────────────────────────────────────────────────
+
+    def save_report(self, pair: str, text: str) -> None:
+        doc = {"pair": pair, "text": text, "saved_at": _utcnow()}
+        if self._use_mongo:
+            try:
+                self._col_reports.replace_one({"pair": pair}, doc, upsert=True)
+            except Exception as exc:
+                logger.error("Ошибка сохранения отчёта %s: %s", pair, exc)
+        else:
+            self.reports[pair] = doc
+            try:
+                REPORTS_FILE.write_text(
+                    json.dumps(self.reports, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                logger.error("Ошибка записи reports.json: %s", exc)
+
+    def get_report(self, pair: str) -> Optional[Dict]:
+        if self._use_mongo:
+            try:
+                return self._col_reports.find_one({"pair": pair}, {"_id": 0})
+            except Exception as exc:
+                logger.error("Ошибка загрузки отчёта %s: %s", pair, exc)
+                return None
+        return self.reports.get(pair)
 
     # ── statistics ────────────────────────────────────────────────────────────
 
