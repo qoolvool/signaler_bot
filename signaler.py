@@ -720,27 +720,21 @@ async def analyze_pair(
         # Та же свеча могла пробить SL — проверяем сразу после открытия
         for closed in portfolio.check_sl_tp(pair, h, l):
             await send_msg(bot, fmt_trade_closed(closed, portfolio.balance))
-    for order in cancelled:
-        await send_msg(bot, fmt_pending_cancelled(order))
 
     # 3. Уровни и сигналы
     levels  = find_support_resistance(df)
     signals = find_entry_signals(df, levels, current_price)
 
-    # 4. Сохраняем отчёт в БД; в чат отправляем только если есть сигнал
-    report_text = fmt_analysis(pair, TIMEFRAME, current_price, levels, signals)
-    portfolio.save_report(pair, report_text)
-    if signals:
-        await send_msg(bot, report_text)
+    # 4. Сохраняем отчёт в БД (без авто-отправки — доступен по кнопке монеты)
+    portfolio.save_report(pair, fmt_analysis(pair, TIMEFRAME, current_price, levels, signals))
 
     # 5. Ордера: всегда только для ближайшего уровня по направлению
-    # Находим лучший (ближайший) сигнал для каждого направления
     best: Dict[str, Optional[Dict]] = {"LONG": None, "SHORT": None}
     for sig in sorted(signals, key=lambda s: s["distance_percent"]):
         if best[sig["direction"]] is None:
             best[sig["direction"]] = sig
 
-    # Отменяем ордера, у которых теперь не самый близкий уровень
+    # Отменяем ордера, у которых теперь не самый близкий уровень (молча)
     tolerance = TOLERANCE_PERCENT / 100
     for order in list(portfolio.pending_orders):
         if order["pair"] != pair:
@@ -751,23 +745,19 @@ async def analyze_pair(
             and abs(b["level"]["price"] - order["entry_price"]) / order["entry_price"] <= tolerance
         )
         if not same_level:
-            reason = "цена ближе к другому уровню" if b else "сигнал пропал"
             portfolio.cancel_order(order)
-            await send_msg(bot, fmt_pending_cancelled(order, reason))
 
-    # Создаём ордер только для ближайшего уровня (по одному на направление)
+    # Создаём ордер только для ближайшего уровня (молча)
     for sig in best.values():
         if sig is None or sig["tp"] is None:
             continue
-        order = portfolio.create_pending_order(
+        portfolio.create_pending_order(
             pair=pair,
             direction=sig["direction"],
             entry_price=sig["level"]["price"],
             sl=sig["sl"],
             tp=sig["tp"],
         )
-        if order:
-            await send_msg(bot, fmt_pending_created(order))
 
 
 # ============================================================
