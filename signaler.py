@@ -81,7 +81,7 @@ SL_PERCENT              = float(os.getenv("SL_PERCENT", "1.5"))  # стоп-ло
 TP_PERCENT              = float(os.getenv("TP_PERCENT", "3.0"))  # тейк-профит от цены входа
 
 DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
-RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "3"))
+RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.05"))
 
 # --- Paper trading ---
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
