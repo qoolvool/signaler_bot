@@ -39,9 +39,11 @@ class PaperPortfolio:
         self.max_open_trades       = max_open_trades
         self.pending_expiry_checks = pending_expiry_checks
         self.leverage              = leverage
-        self.balance: float        = initial_balance
-        self.trades: List[Dict]    = []
+        self.balance: float           = initial_balance
+        self.trades: List[Dict]       = []
         self.pending_orders: List[Dict] = []
+        self.orders_created: int      = 0
+        self.orders_cancelled: int    = 0
 
         self._col_portfolio = None
         self._col_trades    = None
@@ -93,9 +95,11 @@ class PaperPortfolio:
         try:
             state = self._col_portfolio.find_one({"_id": "main"})
             if state:
-                self.balance         = state.get("balance",         self.initial_balance)
-                self.initial_balance = state.get("initial_balance", self.initial_balance)
-                self.pending_orders  = state.get("pending_orders",  [])
+                self.balance           = state.get("balance",           self.initial_balance)
+                self.initial_balance   = state.get("initial_balance",   self.initial_balance)
+                self.pending_orders    = state.get("pending_orders",    [])
+                self.orders_created    = state.get("orders_created",    0)
+                self.orders_cancelled  = state.get("orders_cancelled",  0)
             self.trades = list(self._col_trades.find({}, {"_id": 0}))
             logger.info(
                 "Загружено из MongoDB: баланс $%.2f, сделок %d, ордеров %d",
@@ -109,11 +113,13 @@ class PaperPortfolio:
             self._col_portfolio.replace_one(
                 {"_id": "main"},
                 {
-                    "_id":             "main",
-                    "balance":         self.balance,
-                    "initial_balance": self.initial_balance,
-                    "pending_orders":  self.pending_orders,
-                    "updated_at":      _utcnow(),
+                    "_id":              "main",
+                    "balance":          self.balance,
+                    "initial_balance":  self.initial_balance,
+                    "pending_orders":   self.pending_orders,
+                    "orders_created":   self.orders_created,
+                    "orders_cancelled": self.orders_cancelled,
+                    "updated_at":       _utcnow(),
                 },
                 upsert=True,
             )
@@ -130,9 +136,11 @@ class PaperPortfolio:
         if PORTFOLIO_FILE.exists():
             try:
                 data = json.loads(PORTFOLIO_FILE.read_text(encoding="utf-8"))
-                self.balance         = data.get("balance",         self.initial_balance)
-                self.initial_balance = data.get("initial_balance", self.initial_balance)
-                self.pending_orders  = data.get("pending_orders",  [])
+                self.balance           = data.get("balance",           self.initial_balance)
+                self.initial_balance   = data.get("initial_balance",   self.initial_balance)
+                self.pending_orders    = data.get("pending_orders",    [])
+                self.orders_created    = data.get("orders_created",    0)
+                self.orders_cancelled  = data.get("orders_cancelled",  0)
             except Exception as exc:
                 logger.error("Ошибка чтения portfolio.json: %s", exc)
         if TRADES_FILE.exists():
@@ -150,10 +158,12 @@ class PaperPortfolio:
         try:
             PORTFOLIO_FILE.write_text(
                 json.dumps({
-                    "balance":         self.balance,
-                    "initial_balance": self.initial_balance,
-                    "pending_orders":  self.pending_orders,
-                    "updated_at":      _utcnow(),
+                    "balance":          self.balance,
+                    "initial_balance":  self.initial_balance,
+                    "pending_orders":   self.pending_orders,
+                    "orders_created":   self.orders_created,
+                    "orders_cancelled": self.orders_cancelled,
+                    "updated_at":       _utcnow(),
                 }, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
@@ -254,6 +264,7 @@ class PaperPortfolio:
             "checks_remaining": self.pending_expiry_checks,
         }
         self.pending_orders.append(order)
+        self.orders_created += 1
         self._save()
         logger.info(
             "Ордер #%s %s %s @ %.6f | SL %.6f | TP %.6f | $%.2f",
@@ -295,6 +306,7 @@ class PaperPortfolio:
                 )
             elif order["checks_remaining"] <= 0:
                 cancelled.append(order)
+                self.orders_cancelled += 1
                 logger.info(
                     "Ордер #%s отменён (истёк): %s %s",
                     order["id"], order["direction"], order["pair"],
@@ -332,6 +344,7 @@ class PaperPortfolio:
 
     def cancel_order(self, order: Dict) -> None:
         self.pending_orders = [o for o in self.pending_orders if o["id"] != order["id"]]
+        self.orders_cancelled += 1
         self._save()
         logger.info("Ордер #%s отменён: %s %s", order["id"], order["direction"], order["pair"])
 
@@ -422,10 +435,12 @@ class PaperPortfolio:
         losses    = [t for t in closed if (t["pnl_usd"] or 0) < 0]
         total_pnl = sum(t["pnl_usd"] or 0 for t in closed)
         winrate   = len(wins) / len(closed) * 100 if closed else 0.0
+        avg_pnl   = total_pnl / len(closed) if closed else 0.0
         equity    = self.get_equity(prices)
         bal_chg   = (equity - self.initial_balance) / self.initial_balance * 100
         best  = max(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
         worst = min(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
+        triggered = self.orders_created - self.orders_cancelled
         return {
             "balance":            self.balance,
             "equity":             equity,
@@ -438,8 +453,12 @@ class PaperPortfolio:
             "losses":             len(losses),
             "winrate":            round(winrate, 1),
             "total_pnl":          round(total_pnl, 2),
+            "avg_pnl":            round(avg_pnl, 2),
             "best":               best,
             "worst":              worst,
+            "orders_created":     self.orders_created,
+            "orders_cancelled":   self.orders_cancelled,
+            "orders_triggered":   max(triggered, 0),
         }
 
     def recent_trades(self, n: int = 10) -> List[Dict]:

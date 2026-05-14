@@ -642,15 +642,20 @@ def fmt_stats(ptf: PaperPortfolio) -> str:
     s    = ptf.get_stats()
     sign = "+" if s["balance_change_pct"] >= 0 else ""
     ps   = "+" if s["total_pnl"] >= 0 else ""
+    ap   = "+" if s["avg_pnl"] >= 0 else ""
     lines = [
         "📊 <b>СТАТИСТИКА ПОРТФЕЛЯ</b>", "",
         f"💰 Equity: <b>${s['equity']:,.2f}</b>  ({sign}{s['balance_change_pct']}%)",
         f"🏦 Начальный: ${s['initial_balance']:,.2f}  •  Реализован: ${s['balance']:,.2f}",
         f"📂 Открытых: <b>{s['open_count']}</b>  •  ⏳ Ожидающих: <b>{s['pending_count']}</b>", "",
+        f"📋 Ордеров создано: <b>{s['orders_created']}</b>  •  "
+        f"Срабатывало: <b>{s['orders_triggered']}</b>  •  "
+        f"Отменено: <b>{s['orders_cancelled']}</b>", "",
         f"📈 Всего закрыто: <b>{s['total_closed']}</b>",
         f"  ✅ Прибыльных: <b>{s['wins']}</b>  ({s['winrate']}% winrate)",
         f"  ❌ Убыточных:  <b>{s['losses']}</b>", "",
-        f"💵 Итоговый P&L: <b>{ps}${s['total_pnl']:,.2f}</b>",
+        f"💵 Итоговый P&L: <b>{ps}${s['total_pnl']:,.2f}</b>  •  "
+        f"Средняя сделка: <b>{ap}${s['avg_pnl']:,.2f}</b>",
     ]
     if s["best"]:
         b = s["best"]
@@ -661,24 +666,39 @@ def fmt_stats(ptf: PaperPortfolio) -> str:
     return "\n".join(lines)
 
 
-def fmt_log(ptf: PaperPortfolio, n: int = 10) -> str:
-    trades = ptf.recent_trades(n)
-    if not trades:
-        return "📋 <b>Лог сделок</b>\n\n<i>Закрытых сделок пока нет.</i>"
-    lines = [f"📋 <b>Последние {len(trades)} сделок:</b>", ""]
-    for i, t in enumerate(trades, 1):
-        pnl  = t["pnl_usd"] or 0
-        em   = "✅" if pnl > 0 else "❌"
-        sign = "+" if pnl >= 0 else ""
-        rsn  = "TP" if t["close_reason"] == "TP" else "SL"
-        lines.append(
-            f"{i}. {em} <b>{t['pair']}</b> {t['direction']} [{rsn}]  "
-            f"<b>{sign}${t['pnl_usd']}</b> ({sign}{t['pnl_percent']}%)"
-        )
-        lines.append(
-            f"   {_fp(t['entry_price'])} → {_fp(t['close_price'])}"
-            f"  •  {(t['closed_at'] or '')[:16]}"
-        )
+def fmt_log(ptf: PaperPortfolio, n: int = 20) -> str:
+    open_trades = ptf.open_trades
+    closed      = ptf.recent_trades(n)
+    if not open_trades and not closed:
+        return "📋 <b>Лог сделок</b>\n\n<i>Сделок пока нет.</i>"
+    lines = [f"📋 <b>Лог сделок</b>  (закрытых: {len(ptf.closed_trades)}, открытых: {len(open_trades)})", ""]
+
+    if open_trades:
+        lines.append("<b>— Открытые —</b>")
+        for t in open_trades:
+            de = "📈" if t["direction"] == "LONG" else "📉"
+            lines.append(
+                f"{de} <b>{t['pair']}</b> {t['direction']}  •  вход: {_fp(t['entry_price'])}"
+                f"  •  SL {_fp(t['sl'])}  TP {_fp(t['tp'])}"
+            )
+            lines.append(f"   открыта: {(t.get('opened_at') or '')[:16]}")
+        lines.append("")
+
+    if closed:
+        lines.append(f"<b>— Последние {len(closed)} закрытых —</b>")
+        for i, t in enumerate(closed, 1):
+            pnl  = t["pnl_usd"] or 0
+            em   = "✅" if pnl > 0 else "❌"
+            sign = "+" if pnl >= 0 else ""
+            rsn  = "TP" if t["close_reason"] == "TP" else "SL"
+            lines.append(
+                f"{i}. {em} <b>{t['pair']}</b> {t['direction']} [{rsn}]  "
+                f"<b>{sign}${t['pnl_usd']}</b> ({sign}{t['pnl_percent']}%)"
+            )
+            lines.append(
+                f"   {_fp(t['entry_price'])} → {_fp(t['close_price'])}"
+                f"  •  {(t['closed_at'] or '')[:16]}"
+            )
     return "\n".join(lines)
 
 
