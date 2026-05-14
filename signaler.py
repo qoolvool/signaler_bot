@@ -752,15 +752,6 @@ async def analyze_pair(
 ) -> None:
     logger.info("Анализ: %s", pair)
 
-    # Короткий TF для проверки ордеров и SL/TP — берём обе свечи (завершённую и текущую)
-    df_check = fetch_ohlcv(client, pair, CHECK_TIMEFRAME, 2)
-    if df_check is not None and len(df_check) >= 2:
-        h = max(float(df_check["high"].iloc[-2]), float(df_check["high"].iloc[-1]))
-        l = min(float(df_check["low"].iloc[-2]),  float(df_check["low"].iloc[-1]))
-        check_hl: Optional[tuple] = (h, l)
-    else:
-        check_hl = None
-
     # Основной TF для анализа уровней и сигналов
     df = fetch_ohlcv(client, pair, TIMEFRAME, CANDLES_LIMIT)
     if df is None or df.empty:
@@ -773,11 +764,21 @@ async def analyze_pair(
         current_price = float(df["close"].iloc[-1])
     portfolio.update_price(pair, current_price)
 
-    if check_hl is None:
+    # Короткий TF для SL/TP — прямой вызов CCXT (без проверки min_candles из fetch_ohlcv)
+    try:
+        raw_check = client.fetch_ohlcv(pair, CHECK_TIMEFRAME, limit=5)
+        if raw_check and len(raw_check) >= 2:
+            h = max(r[2] for r in raw_check[-2:])  # high
+            l = min(r[3] for r in raw_check[-2:])  # low
+        else:
+            raise ValueError("мало свечей")
+    except Exception:
         h = max(float(df["high"].iloc[-2]), float(df["high"].iloc[-1]))
         l = min(float(df["low"].iloc[-2]),  float(df["low"].iloc[-1]))
-    else:
-        h, l = check_hl
+
+    # Всегда включаем текущую живую цену, чтобы SL/TP срабатывал без задержки
+    h = max(h, current_price)
+    l = min(l, current_price)
 
     # 1. Закрытие открытых сделок по SL/TP
     for trade in portfolio.check_sl_tp(pair, h, l):
