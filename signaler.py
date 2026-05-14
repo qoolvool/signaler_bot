@@ -91,7 +91,7 @@ RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.05"))
 # --- Paper trading ---
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
 TRADE_SIZE_PERCENT     = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
-MAX_OPEN_TRADES        = int(os.getenv("MAX_OPEN_TRADES", "5"))
+MAX_OPEN_TRADES        = int(os.getenv("MAX_OPEN_TRADES", "0"))  # 0 = без лимита
 PENDING_EXPIRY_CHECKS  = int(os.getenv("PENDING_EXPIRY_CHECKS", "99999"))  # отмена по близости, не по счётчику
 LEVERAGE               = int(os.getenv("LEVERAGE", "10"))
 
@@ -778,7 +778,7 @@ async def analyze_pair(
     # 2. Проверка ожидающих ордеров — коснулась ли цена уровня
     triggered, cancelled = portfolio.check_pending_orders(pair, h, l)
     for trade in triggered:
-        await send_msg(bot, fmt_pending_triggered(trade, portfolio.get_equity()))
+        await send_msg(bot, fmt_trade_opened(trade, portfolio.get_equity()))
         # Та же свеча могла пробить SL — проверяем сразу после открытия
         for closed in portfolio.check_sl_tp(pair, h, l):
             await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
