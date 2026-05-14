@@ -23,14 +23,15 @@ from typing import Dict, List, Optional
 
 import ccxt
 import pandas as pd
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Bot, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from paper_trader import PaperPortfolio
@@ -404,14 +405,13 @@ def find_entry_signals(
 # ============================================================
 # TELEGRAM — отправка
 # ============================================================
-async def send_msg(bot: Bot, text: str, reply_markup=None) -> bool:
+async def send_msg(bot: Bot, text: str) -> bool:
     try:
         await bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=text,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
-            reply_markup=reply_markup,
         )
         return True
     except TelegramError as exc:
@@ -431,12 +431,11 @@ def _fp(price: float) -> str:
     return f"{price:.8f}"
 
 
-_MENU = InlineKeyboardMarkup([
-    [
-        InlineKeyboardButton("📊 Статистика", callback_data="stats"),
-        InlineKeyboardButton("📋 Лог сделок", callback_data="log"),
-    ]
-])
+REPLY_KB = ReplyKeyboardMarkup(
+    [["📊 Статистика", "📋 Лог сделок", "📂 Позиции"]],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 
 def fmt_analysis(
@@ -603,6 +602,58 @@ def fmt_log(ptf: PaperPortfolio, n: int = 10) -> str:
     return "\n".join(lines)
 
 
+def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
+    open_t   = ptf.open_trades
+    pending  = ptf.pending_orders
+    if not open_t and not pending:
+        return "📂 <b>Активных позиций нет</b>\n\n<i>Жду сигналов...</i>"
+
+    lines = ["📂 <b>ТЕКУЩИЕ ПОЗИЦИИ</b>", ""]
+
+    for t in open_t:
+        de  = "📈" if t["direction"] == "LONG" else "📉"
+        cur = prices.get(t["pair"])
+        if cur:
+            lev  = t.get("leverage", 1)
+            ntl  = t.get("notional", t["size_usd"])
+            upnl = ((cur - t["entry_price"]) / t["entry_price"] * ntl
+                    if t["direction"] == "LONG"
+                    else (t["entry_price"] - cur) / t["entry_price"] * ntl)
+            upnl_pct = upnl / t["size_usd"] * 100
+            sign = "+" if upnl >= 0 else ""
+            pnl_line = f"\n   PnL: <b>{sign}${upnl:.2f}  ({sign}{upnl_pct:.1f}%)</b>  •  Цена: {_fp(cur)}"
+        else:
+            pnl_line = ""
+        lines.append(
+            f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}\n"
+            f"   Вход: {_fp(t['entry_price'])}  SL: {_fp(t['sl'])}  TP: {_fp(t['tp'])}"
+            f"{pnl_line}"
+        )
+
+    if pending:
+        lines += ["", "⏳ <b>Ожидающие ордера:</b>"]
+        for o in pending:
+            de = "📈" if o["direction"] == "LONG" else "📉"
+            lines.append(
+                f"{de} <b>#{o['id']}</b> {o['pair']}  •  {o['direction']}\n"
+                f"   Лимит: {_fp(o['entry_price'])}  •  Осталось проверок: {o['checks_remaining']}"
+            )
+
+    return "\n".join(lines)
+
+
+def _fetch_current_prices(client, trades: List[Dict]) -> Dict[str, float]:
+    if not client or not trades:
+        return {}
+    prices: Dict[str, float] = {}
+    for pair in {t["pair"] for t in trades}:
+        try:
+            prices[pair] = float(client.fetch_ticker(pair)["last"])
+        except Exception:
+            pass
+    return prices
+
+
 # ============================================================
 # АНАЛИЗ ПАРЫ (с бумажной торговлей)
 # ============================================================
@@ -661,33 +712,37 @@ async def analyze_pair(
 # ============================================================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "👋 Я сигналер + бумажный трейдер. Используй кнопки ниже.",
-        reply_markup=_MENU,
+        "👋 Бот запущен. Используй кнопки внизу.",
+        reply_markup=REPLY_KB,
     )
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        fmt_stats(portfolio), parse_mode=ParseMode.HTML, reply_markup=_MENU,
+        fmt_stats(portfolio), parse_mode=ParseMode.HTML, reply_markup=REPLY_KB,
     )
 
 
 async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        fmt_log(portfolio), parse_mode=ParseMode.HTML, reply_markup=_MENU,
+        fmt_log(portfolio), parse_mode=ParseMode.HTML, reply_markup=REPLY_KB,
     )
 
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    if query.data == "stats":
-        text = fmt_stats(portfolio)
-    elif query.data == "log":
-        text = fmt_log(portfolio)
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    txt = update.message.text or ""
+    if "Статистика" in txt:
+        msg = fmt_stats(portfolio)
+    elif "Лог" in txt:
+        msg = fmt_log(portfolio)
+    elif "Позиции" in txt:
+        prices = _fetch_current_prices(
+            context.bot_data.get("client"), portfolio.open_trades
+        )
+        msg = fmt_open_trades(portfolio, prices)
     else:
         return
-    await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_MENU)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
 
 
 # ============================================================
@@ -733,7 +788,7 @@ async def post_init(app: Application) -> None:
             chat_id=TELEGRAM_CHAT_ID,
             text=text,
             parse_mode=ParseMode.HTML,
-            reply_markup=_MENU,
+            reply_markup=REPLY_KB,
         )
     except TelegramError as exc:
         logger.error("Ошибка стартового сообщения: %s", exc)
@@ -757,7 +812,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("log",   cmd_log))
-    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     interval_sec = int(RUN_INTERVAL_HOURS * 3600)
     if interval_sec > 0:
