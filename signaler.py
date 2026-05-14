@@ -703,7 +703,10 @@ async def analyze_pair(
         logger.warning("Пропускаем %s (нет данных)", pair)
         return
 
-    current_price = float(df["close"].iloc[-1])
+    try:
+        current_price = float(client.fetch_ticker(pair)["last"])
+    except Exception:
+        current_price = float(df["close"].iloc[-1])
     portfolio.update_price(pair, current_price)
 
     if last_check is None:
