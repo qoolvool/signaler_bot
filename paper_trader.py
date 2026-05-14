@@ -1,7 +1,6 @@
 """
 Paper trading simulation engine.
-Pending (limit) orders wait for price to touch the entry level before opening.
-State persists in trades.json and portfolio.json.
+Storage: MongoDB Atlas (if MONGODB_URI is set) or JSON files as fallback.
 """
 
 import json
@@ -14,9 +13,15 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("signaler.paper")
 
-_BASE = Path(os.getenv("DATA_DIR", str(Path(__file__).parent)))
+_BASE          = Path(os.getenv("DATA_DIR", str(Path(__file__).parent)))
 TRADES_FILE    = _BASE / "trades.json"
 PORTFOLIO_FILE = _BASE / "portfolio.json"
+
+try:
+    from pymongo import MongoClient
+    _PYMONGO = True
+except ImportError:
+    _PYMONGO = False
 
 
 class PaperPortfolio:
@@ -36,38 +41,110 @@ class PaperPortfolio:
         self.balance: float        = initial_balance
         self.trades: List[Dict]    = []
         self.pending_orders: List[Dict] = []
+
+        self._col_portfolio = None
+        self._col_trades    = None
+        self._connect_mongo()
         self._load()
 
-    # ── persistence ───────────────────────────────────────────────────────────
+    # ── MongoDB connection ────────────────────────────────────────────────────
+
+    def _connect_mongo(self) -> None:
+        uri = os.getenv("MONGODB_URI", "")
+        if not uri:
+            return
+        if not _PYMONGO:
+            logger.warning("pymongo не установлен — используются файлы. Запусти: pip install pymongo[srv]")
+            return
+        try:
+            client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+            client.admin.command("ping")
+            db = client["signaler_bot"]
+            self._col_portfolio = db["portfolio"]
+            self._col_trades    = db["trades"]
+            logger.info("MongoDB Atlas подключён ✓")
+        except Exception as exc:
+            logger.error("MongoDB недоступен, использую файлы: %s", exc)
+
+    @property
+    def _use_mongo(self) -> bool:
+        return self._col_portfolio is not None
+
+    # ── load / save ───────────────────────────────────────────────────────────
 
     def _load(self) -> None:
+        if self._use_mongo:
+            self._load_mongo()
+        else:
+            self._load_files()
+
+    def _save(self) -> None:
+        if self._use_mongo:
+            self._save_mongo()
+        else:
+            self._save_files()
+
+    def _load_mongo(self) -> None:
+        try:
+            state = self._col_portfolio.find_one({"_id": "main"})
+            if state:
+                self.balance         = state.get("balance",         self.initial_balance)
+                self.initial_balance = state.get("initial_balance", self.initial_balance)
+                self.pending_orders  = state.get("pending_orders",  [])
+            self.trades = list(self._col_trades.find({}, {"_id": 0}))
+            logger.info(
+                "Загружено из MongoDB: баланс $%.2f, сделок %d, ордеров %d",
+                self.balance, len(self.trades), len(self.pending_orders),
+            )
+        except Exception as exc:
+            logger.error("Ошибка загрузки из MongoDB: %s", exc)
+
+    def _save_mongo(self) -> None:
+        try:
+            self._col_portfolio.replace_one(
+                {"_id": "main"},
+                {
+                    "_id":             "main",
+                    "balance":         self.balance,
+                    "initial_balance": self.initial_balance,
+                    "pending_orders":  self.pending_orders,
+                    "updated_at":      _utcnow(),
+                },
+                upsert=True,
+            )
+            for trade in self.trades:
+                self._col_trades.replace_one(
+                    {"id": trade["id"]},
+                    trade,
+                    upsert=True,
+                )
+        except Exception as exc:
+            logger.error("Ошибка сохранения в MongoDB: %s", exc)
+
+    def _load_files(self) -> None:
         if PORTFOLIO_FILE.exists():
             try:
                 data = json.loads(PORTFOLIO_FILE.read_text(encoding="utf-8"))
-                self.balance        = data.get("balance",         self.initial_balance)
+                self.balance         = data.get("balance",         self.initial_balance)
                 self.initial_balance = data.get("initial_balance", self.initial_balance)
                 self.pending_orders  = data.get("pending_orders",  [])
             except Exception as exc:
                 logger.error("Ошибка чтения portfolio.json: %s", exc)
-
         if TRADES_FILE.exists():
             try:
                 self.trades = json.loads(TRADES_FILE.read_text(encoding="utf-8"))
             except Exception as exc:
                 logger.error("Ошибка чтения trades.json: %s", exc)
 
-    def _save(self) -> None:
+    def _save_files(self) -> None:
         try:
             PORTFOLIO_FILE.write_text(
-                json.dumps(
-                    {
-                        "balance":          self.balance,
-                        "initial_balance":  self.initial_balance,
-                        "pending_orders":   self.pending_orders,
-                        "updated_at":       _utcnow(),
-                    },
-                    indent=2, ensure_ascii=False,
-                ),
+                json.dumps({
+                    "balance":         self.balance,
+                    "initial_balance": self.initial_balance,
+                    "pending_orders":  self.pending_orders,
+                    "updated_at":      _utcnow(),
+                }, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
             TRADES_FILE.write_text(
@@ -105,19 +182,17 @@ class PaperPortfolio:
         self,
         pair: str,
         direction: str,
-        entry_price: float,  # exact level price
+        entry_price: float,
         sl: float,
         tp: float,
     ) -> Optional[Dict]:
-        """Place a limit order at entry_price. Activates when price touches the level."""
         if self.has_pending_order(pair, direction):
             logger.info("Ордер %s %s уже ожидает.", direction, pair)
             return None
         if self.has_open_trade(pair, direction):
             logger.info("Позиция %s %s уже открыта.", direction, pair)
             return None
-        active = len(self.open_trades) + len(self.pending_orders)
-        if active >= self.max_open_trades:
+        if len(self.open_trades) + len(self.pending_orders) >= self.max_open_trades:
             logger.info("Лимит позиций (%d) достигнут.", self.max_open_trades)
             return None
 
@@ -157,12 +232,6 @@ class PaperPortfolio:
         candle_high: float,
         candle_low: float,
     ) -> Tuple[List[Dict], List[Dict]]:
-        """
-        Check if any pending order for this pair was triggered by the candle.
-        LONG triggered when candle_low  <= entry_price  (limit buy filled)
-        SHORT triggered when candle_high >= entry_price  (limit sell filled)
-        Returns (triggered_trades, cancelled_orders).
-        """
         triggered: List[Dict] = []
         cancelled: List[Dict] = []
         remaining: List[Dict] = []
@@ -173,7 +242,6 @@ class PaperPortfolio:
                 continue
 
             order["checks_remaining"] -= 1
-
             hit = (
                 order["direction"] == "LONG"  and candle_low  <= order["entry_price"] or
                 order["direction"] == "SHORT" and candle_high >= order["entry_price"]
@@ -190,8 +258,8 @@ class PaperPortfolio:
             elif order["checks_remaining"] <= 0:
                 cancelled.append(order)
                 logger.info(
-                    "Ордер #%s отменён (истёк): %s %s @ %.6f",
-                    order["id"], order["direction"], order["pair"], order["entry_price"],
+                    "Ордер #%s отменён (истёк): %s %s",
+                    order["id"], order["direction"], order["pair"],
                 )
             else:
                 remaining.append(order)
@@ -199,7 +267,6 @@ class PaperPortfolio:
         self.pending_orders = remaining
         if triggered or cancelled:
             self._save()
-
         return triggered, cancelled
 
     def _make_trade(self, order: Dict) -> Dict:
@@ -233,7 +300,6 @@ class PaperPortfolio:
         candle_high: float,
         candle_low: float,
     ) -> List[Dict]:
-        """Check open trades for this pair against candle high/low. Returns closed trades."""
         closed = []
         for trade in list(self.open_trades):
             if trade["pair"] != pair:
@@ -250,13 +316,12 @@ class PaperPortfolio:
         return closed
 
     def _close_trade(self, trade: Dict, close_price: float, reason: str) -> Dict:
-        leverage = trade.get("leverage", 1)
         notional = trade.get("notional", trade["size_usd"])
         if trade["direction"] == "LONG":
             pnl = (close_price - trade["entry_price"]) / trade["entry_price"] * notional
         else:
             pnl = (trade["entry_price"] - close_price) / trade["entry_price"] * notional
-        pnl_pct = pnl / trade["size_usd"] * 100  # % от маржи
+        pnl_pct = pnl / trade["size_usd"] * 100
         trade.update(
             status="CLOSED", closed_at=_utcnow(), close_price=close_price,
             close_reason=reason, pnl_usd=round(pnl, 2), pnl_percent=round(pnl_pct, 2),
@@ -273,27 +338,27 @@ class PaperPortfolio:
     # ── statistics ────────────────────────────────────────────────────────────
 
     def get_stats(self) -> Dict:
-        closed   = self.closed_trades
-        wins     = [t for t in closed if (t["pnl_usd"] or 0) > 0]
-        losses   = [t for t in closed if (t["pnl_usd"] or 0) <= 0]
+        closed    = self.closed_trades
+        wins      = [t for t in closed if (t["pnl_usd"] or 0) > 0]
+        losses    = [t for t in closed if (t["pnl_usd"] or 0) <= 0]
         total_pnl = sum(t["pnl_usd"] or 0 for t in closed)
-        winrate  = len(wins) / len(closed) * 100 if closed else 0.0
-        bal_chg  = (self.balance - self.initial_balance) / self.initial_balance * 100
+        winrate   = len(wins) / len(closed) * 100 if closed else 0.0
+        bal_chg   = (self.balance - self.initial_balance) / self.initial_balance * 100
         best  = max(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
         worst = min(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
         return {
-            "balance":           self.balance,
-            "initial_balance":   self.initial_balance,
+            "balance":            self.balance,
+            "initial_balance":    self.initial_balance,
             "balance_change_pct": round(bal_chg, 2),
-            "open_count":        len(self.open_trades),
-            "pending_count":     len(self.pending_orders),
-            "total_closed":      len(closed),
-            "wins":              len(wins),
-            "losses":            len(losses),
-            "winrate":           round(winrate, 1),
-            "total_pnl":         round(total_pnl, 2),
-            "best":              best,
-            "worst":             worst,
+            "open_count":         len(self.open_trades),
+            "pending_count":      len(self.pending_orders),
+            "total_closed":       len(closed),
+            "wins":               len(wins),
+            "losses":             len(losses),
+            "winrate":            round(winrate, 1),
+            "total_pnl":          round(total_pnl, 2),
+            "best":               best,
+            "worst":              worst,
         }
 
     def recent_trades(self, n: int = 10) -> List[Dict]:
