@@ -280,8 +280,8 @@ class PaperPortfolio:
             pair_had_orders = True
             order["checks_remaining"] -= 1
             hit = (
-                order["direction"] == "LONG"  and candle_low  <= order["entry_price"] or
-                order["direction"] == "SHORT" and candle_high >= order["entry_price"]
+                (order["direction"] == "LONG"  and candle_low  <= order["entry_price"]) or
+                (order["direction"] == "SHORT" and candle_high >= order["entry_price"])
             )
 
             if hit:
@@ -411,7 +411,7 @@ class PaperPortfolio:
     def get_stats(self, prices: Optional[Dict[str, float]] = None) -> Dict:
         closed    = self.closed_trades
         wins      = [t for t in closed if (t["pnl_usd"] or 0) > 0]
-        losses    = [t for t in closed if (t["pnl_usd"] or 0) <= 0]
+        losses    = [t for t in closed if (t["pnl_usd"] or 0) < 0]
         total_pnl = sum(t["pnl_usd"] or 0 for t in closed)
         winrate   = len(wins) / len(closed) * 100 if closed else 0.0
         equity    = self.get_equity(prices)
