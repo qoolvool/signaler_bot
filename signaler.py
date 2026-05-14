@@ -56,9 +56,9 @@ TRADING_PAIRS = [
     if p.strip()
 ]
 
-TIMEFRAME             = os.getenv("TIMEFRAME", "4h")
+TIMEFRAME             = os.getenv("TIMEFRAME", "1h")
 CANDLES_LIMIT         = int(os.getenv("CANDLES_LIMIT", "250"))
-MIN_TOUCHES           = int(os.getenv("MIN_TOUCHES", "5"))
+MIN_TOUCHES           = int(os.getenv("MIN_TOUCHES", "3"))
 TOLERANCE_PERCENT     = float(os.getenv("TOLERANCE_PERCENT", "0.8"))
 EXTREMA_WINDOW        = int(os.getenv("EXTREMA_WINDOW", "8"))
 TOP_N_LEVELS          = int(os.getenv("TOP_N_LEVELS", "5"))
@@ -69,10 +69,10 @@ REQUIRE_RETEST        = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
 
 ENTRY_PROXIMITY_PERCENT = float(os.getenv("ENTRY_PROXIMITY_PERCENT", "0.5"))
 EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
-AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "10"))
+AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "20"))
 
 DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
-RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "1"))
+RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.5"))
 
 # --- Paper trading ---
 INITIAL_BALANCE      = float(os.getenv("INITIAL_BALANCE", "1000"))
