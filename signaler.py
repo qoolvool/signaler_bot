@@ -704,10 +704,13 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
             pnl_line = f"\n   PnL: <b>{sign}${upnl:.2f}  ({sign}{upnl_pct:.1f}%)</b>  •  Цена: {_fp(cur)}"
         else:
             pnl_line = ""
+        ep = t["entry_price"]
+        sl_pct = t.get("risk_pct") or (round(abs(ep - t["sl"]) / ep * 100, 2) if ep else "?")
+        tp_pct = t.get("reward_pct") or (round(abs(t["tp"] - ep) / ep * 100, 2) if ep else "?")
         lines.append(
             f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}\n"
-            f"   Вход: {_fp(t['entry_price'])}\n"
-            f"   SL: {_fp(t['sl'])}  (-{t['risk_pct']}%)  •  TP: {_fp(t['tp'])}  (+{t['reward_pct']}%)"
+            f"   Вход: {_fp(ep)}\n"
+            f"   SL: {_fp(t['sl'])}  (-{sl_pct}%)  •  TP: {_fp(t['tp'])}  (+{tp_pct}%)"
             f"{pnl_line}"
         )
 
@@ -715,10 +718,13 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
         lines += ["", "⏳ <b>Ожидающие ордера:</b>"]
         for o in pending:
             de = "📈" if o["direction"] == "LONG" else "📉"
+            ep = o["entry_price"]
+            sl_pct = o.get("risk_pct") or (round(abs(ep - o["sl"]) / ep * 100, 2) if ep else "?")
+            tp_pct = o.get("reward_pct") or (round(abs(o["tp"] - ep) / ep * 100, 2) if ep else "?")
             lines.append(
                 f"{de} <b>#{o['id']}</b> {o['pair']}  •  {o['direction']}\n"
-                f"   Лимит: {_fp(o['entry_price'])}  "
-                f"SL: {_fp(o['sl'])}  (-{o['risk_pct']}%)  •  TP: {_fp(o['tp'])}  (+{o['reward_pct']}%)"
+                f"   Лимит: {_fp(ep)}  "
+                f"SL: {_fp(o['sl'])}  (-{sl_pct}%)  •  TP: {_fp(o['tp'])}  (+{tp_pct}%)"
             )
 
     return "\n".join(lines)
