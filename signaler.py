@@ -53,7 +53,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "")
 
 TRADING_PAIRS = [
-    p.strip() for p in os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(",")
+    p.strip() for p in os.getenv("TRADING_PAIRS", (
+        "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,"
+        "ADA/USDT,AVAX/USDT,DOT/USDT,ATOM/USDT,LINK/USDT,"
+        "LTC/USDT,NEAR/USDT,UNI/USDT,FIL/USDT,INJ/USDT,"
+        "RNDR/USDT,TON/USDT,SUI/USDT,ARB/USDT,OP/USDT"
+    )).split(",")
     if p.strip()
 ]
 
@@ -70,7 +75,7 @@ REQUIRE_RETEST        = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
 
 ENTRY_PROXIMITY_PERCENT = float(os.getenv("ENTRY_PROXIMITY_PERCENT", "0.5"))
 EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
-AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "20"))
+AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "0"))
 SL_PERCENT              = float(os.getenv("SL_PERCENT", "1.5"))  # стоп-лосс от цены входа
 TP_PERCENT              = float(os.getenv("TP_PERCENT", "3.0"))  # тейк-профит от цены входа
 
