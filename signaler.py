@@ -689,13 +689,14 @@ async def analyze_pair(
 ) -> None:
     logger.info("Анализ: %s", pair)
 
-    # Короткий TF для проверки ордеров и SL/TP (свежее касание цены)
+    # Короткий TF для проверки ордеров и SL/TP — берём обе свечи (завершённую и текущую)
     df_check = fetch_ohlcv(client, pair, CHECK_TIMEFRAME, 3)
     if df_check is not None and len(df_check) >= 2:
-        last_check = df_check.iloc[-2]
+        h = max(float(df_check["high"].iloc[-2]), float(df_check["high"].iloc[-1]))
+        l = min(float(df_check["low"].iloc[-2]),  float(df_check["low"].iloc[-1]))
+        check_hl: Optional[tuple] = (h, l)
     else:
-        # фоллбэк: загрузим основной TF ниже и возьмём его свечу
-        last_check = None
+        check_hl = None
 
     # Основной TF для анализа уровней и сигналов
     df = fetch_ohlcv(client, pair, TIMEFRAME, CANDLES_LIMIT)
@@ -709,9 +710,11 @@ async def analyze_pair(
         current_price = float(df["close"].iloc[-1])
     portfolio.update_price(pair, current_price)
 
-    if last_check is None:
-        last_check = df.iloc[-2]
-    h, l = float(last_check["high"]), float(last_check["low"])
+    if check_hl is None:
+        h = max(float(df["high"].iloc[-2]), float(df["high"].iloc[-1]))
+        l = min(float(df["low"].iloc[-2]),  float(df["low"].iloc[-1]))
+    else:
+        h, l = check_hl
 
     # 1. Закрытие открытых сделок по SL/TP
     for trade in portfolio.check_sl_tp(pair, h, l):
