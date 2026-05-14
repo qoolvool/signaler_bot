@@ -23,11 +23,12 @@ from typing import Dict, List, Optional
 
 import ccxt
 import pandas as pd
-from telegram import Bot, ReplyKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -53,7 +54,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "")
 
 TRADING_PAIRS = [
-    p.strip() for p in os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(",")
+    p.strip() for p in os.getenv("TRADING_PAIRS", (
+        "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,"
+        "ADA/USDT,AVAX/USDT,DOT/USDT,ATOM/USDT,LINK/USDT,"
+        "LTC/USDT,NEAR/USDT,UNI/USDT,FIL/USDT,INJ/USDT,"
+        "RNDR/USDT,TON/USDT,SUI/USDT,ARB/USDT,OP/USDT"
+    )).split(",")
     if p.strip()
 ]
 
@@ -70,7 +76,7 @@ REQUIRE_RETEST        = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
 
 ENTRY_PROXIMITY_PERCENT = float(os.getenv("ENTRY_PROXIMITY_PERCENT", "0.5"))
 EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
-AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "20"))
+AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "0"))
 SL_PERCENT              = float(os.getenv("SL_PERCENT", "1.5"))  # стоп-лосс от цены входа
 TP_PERCENT              = float(os.getenv("TP_PERCENT", "3.0"))  # тейк-профит от цены входа
 
@@ -432,10 +438,27 @@ def _fp(price: float) -> str:
 
 
 REPLY_KB = ReplyKeyboardMarkup(
-    [["📊 Статистика", "📋 Лог сделок", "📂 Позиции"]],
+    [
+        ["📊 Статистика", "📋 Лог сделок", "📂 Позиции"],
+        ["📈 Монеты"],
+    ],
     resize_keyboard=True,
     is_persistent=True,
 )
+
+
+def _build_pairs_keyboard() -> InlineKeyboardMarkup:
+    buttons: list = []
+    row: list = []
+    for pair in TRADING_PAIRS:
+        base = pair.split("/")[0]
+        row.append(InlineKeyboardButton(base, callback_data=f"report:{pair}"))
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons)
 
 
 def fmt_analysis(
@@ -689,8 +712,11 @@ async def analyze_pair(
     levels  = find_support_resistance(df)
     signals = find_entry_signals(df, levels, current_price)
 
-    # 4. Аналитическое сообщение
-    await send_msg(bot, fmt_analysis(pair, TIMEFRAME, current_price, levels, signals))
+    # 4. Сохраняем отчёт в БД; в чат отправляем только если есть сигнал
+    report_text = fmt_analysis(pair, TIMEFRAME, current_price, levels, signals)
+    portfolio.save_report(pair, report_text)
+    if signals:
+        await send_msg(bot, report_text)
 
     # 5. Размещаем лимитные ордера на точной цене уровня
     for sig in signals:
@@ -733,16 +759,48 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     txt = update.message.text or ""
     if "Статистика" in txt:
         msg = fmt_stats(portfolio)
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
     elif "Лог" in txt:
         msg = fmt_log(portfolio)
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
     elif "Позиции" in txt:
         prices = _fetch_current_prices(
             context.bot_data.get("client"), portfolio.open_trades
         )
         msg = fmt_open_trades(portfolio, prices)
-    else:
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
+    elif "Монеты" in txt:
+        await update.message.reply_text(
+            "📈 <b>Выбери монету для просмотра отчёта:</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_build_pairs_keyboard(),
+        )
+
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+
+    if data == "pairs_list":
+        await query.edit_message_text(
+            "📈 <b>Выбери монету для просмотра отчёта:</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_build_pairs_keyboard(),
+        )
         return
-    await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
+
+    if data.startswith("report:"):
+        pair = data[7:]
+        report = portfolio.get_report(pair)
+        if report:
+            msg = f"{report['text']}\n\n<i>🕒 Обновлено: {report.get('saved_at', '')}</i>"
+        else:
+            msg = f"⚠️ <i>Отчёт по {pair} ещё не готов — подождите следующего цикла анализа.</i>"
+        back_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ К монетам", callback_data="pairs_list")
+        ]])
+        await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=back_kb)
 
 
 # ============================================================
@@ -813,6 +871,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("log",   cmd_log))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(CallbackQueryHandler(callback_handler))
 
     interval_sec = int(RUN_INTERVAL_HOURS * 3600)
     if interval_sec > 0:
