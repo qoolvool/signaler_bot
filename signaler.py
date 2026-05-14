@@ -88,7 +88,7 @@ RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.05"))
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
 TRADE_SIZE_PERCENT     = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
 MAX_OPEN_TRADES        = int(os.getenv("MAX_OPEN_TRADES", "5"))
-PENDING_EXPIRY_CHECKS  = int(os.getenv("PENDING_EXPIRY_CHECKS", "8"))
+PENDING_EXPIRY_CHECKS  = int(os.getenv("PENDING_EXPIRY_CHECKS", "99999"))  # отмена по близости, не по счётчику
 LEVERAGE               = int(os.getenv("LEVERAGE", "10"))
 
 
@@ -557,7 +557,7 @@ def fmt_pending_created(order: Dict) -> str:
         f"SL: <b>{_fp(order['sl'])}</b>  (-{order['risk_pct']}%)\n"
         f"TP: <b>{_fp(order['tp'])}</b>  (+{order['reward_pct']}%){rr}\n"
         f"Маржа: <b>${order['size_usd']}</b>  •  Плечо: <b>{lev}×</b>  •  Позиция: <b>${ntl}</b>\n"
-        f"<i>Ждём касания уровня... (до {chk} проверок)</i>"
+        f"<i>Ждём касания уровня...</i>"
     )
 
 
@@ -573,12 +573,13 @@ def fmt_pending_triggered(trade: Dict, balance: float) -> str:
     )
 
 
-def fmt_pending_cancelled(order: Dict) -> str:
+def fmt_pending_cancelled(order: Dict, reason: str = "истёк срок") -> str:
     de = "📈" if order["direction"] == "LONG" else "📉"
     return (
         f"🗑 <b>ОРДЕР ОТМЕНЁН #{order['id']}</b>\n"
         f"{de} {order['pair']}  •  {order['direction']}\n"
-        f"<i>Цена не коснулась {_fp(order['entry_price'])} за отведённое время</i>"
+        f"Уровень: {_fp(order['entry_price'])}\n"
+        f"<i>Причина: {reason}</i>"
     )
 
 
@@ -729,14 +730,36 @@ async def analyze_pair(
     if signals:
         await send_msg(bot, report_text)
 
-    # 5. Размещаем лимитные ордера на точной цене уровня
-    for sig in signals:
-        if sig["tp"] is None:
+    # 5. Ордера: всегда только для ближайшего уровня по направлению
+    # Находим лучший (ближайший) сигнал для каждого направления
+    best: Dict[str, Optional[Dict]] = {"LONG": None, "SHORT": None}
+    for sig in sorted(signals, key=lambda s: s["distance_percent"]):
+        if best[sig["direction"]] is None:
+            best[sig["direction"]] = sig
+
+    # Отменяем ордера, у которых теперь не самый близкий уровень
+    tolerance = TOLERANCE_PERCENT / 100
+    for order in list(portfolio.pending_orders):
+        if order["pair"] != pair:
+            continue
+        b = best.get(order["direction"])
+        same_level = (
+            b is not None
+            and abs(b["level"]["price"] - order["entry_price"]) / order["entry_price"] <= tolerance
+        )
+        if not same_level:
+            reason = "цена ближе к другому уровню" if b else "сигнал пропал"
+            portfolio.cancel_order(order)
+            await send_msg(bot, fmt_pending_cancelled(order, reason))
+
+    # Создаём ордер только для ближайшего уровня (по одному на направление)
+    for sig in best.values():
+        if sig is None or sig["tp"] is None:
             continue
         order = portfolio.create_pending_order(
             pair=pair,
             direction=sig["direction"],
-            entry_price=sig["level"]["price"],  # точная цена уровня, не текущая
+            entry_price=sig["level"]["price"],
             sl=sig["sl"],
             tp=sig["tp"],
         )
