@@ -1,19 +1,16 @@
 """
-MEXC Support & Resistance Signaler
-====================================
-Скрипт для поиска уровней поддержки и сопротивления на бирже MEXC
-и отправки сигналов в Telegram.
+MEXC Support & Resistance Signaler + Paper Trader
+==================================================
+Поиск уровней S/R, генерация точек входа и симуляция сделок
+на виртуальном балансе $1 000.
 
-Script for finding support and resistance levels on MEXC exchange
-and sending signals to Telegram.
-
-Установка зависимостей / Install dependencies:
+Установка:
     pip3 install -r requirements.txt
 
-Настройка / Setup:
-    cp .env.example .env  и заполни ключи в .env
+Настройка:
+    cp .env.example .env  # заполни ключи
 
-Запуск / Run:
+Запуск:
     python3 signaler.py
 """
 
@@ -21,101 +18,70 @@ import asyncio
 import logging
 import os
 import sys
-import time
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
 import ccxt
-import numpy as np
 import pandas as pd
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+)
 
-# Опциональная загрузка .env (если установлен python-dotenv) /
-# Optional .env loading (if python-dotenv is installed)
+from paper_trader import PaperPortfolio
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    # Если python-dotenv не установлен, читаем напрямую из окружения
     pass
 
 
 # ============================================================
-# КОНФИГУРАЦИЯ / CONFIGURATION
+# КОНФИГУРАЦИЯ
 # ============================================================
-# Секреты загружаются из переменных окружения (см. .env.example) /
-# Secrets are loaded from environment variables (see .env.example)
 
-# --- Секретные данные (из .env) / Secrets (from .env) ---
-MEXC_API_KEY = os.getenv("MEXC_API_KEY", "")
-MEXC_SECRET_KEY = os.getenv("MEXC_SECRET_KEY", "")
+MEXC_API_KEY      = os.getenv("MEXC_API_KEY", "")
+MEXC_SECRET_KEY   = os.getenv("MEXC_SECRET_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# --- Несекретные параметры / Non-sensitive parameters ---
-# Можно переопределить через env или менять прямо здесь
-# Can be overridden via env or edited here directly
-
-# Торговые пары для анализа (через запятую в .env) /
-# Trading pairs to analyze (comma-separated in .env)
 TRADING_PAIRS = [
     p.strip() for p in os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(",")
     if p.strip()
 ]
 
-# Таймфрейм / Timeframe (1m, 5m, 15m, 1h, 4h, 1d, ...)
-TIMEFRAME = os.getenv("TIMEFRAME", "4h")
-
-# Количество свечей для анализа / Number of candles to analyze
-CANDLES_LIMIT = int(os.getenv("CANDLES_LIMIT", "250"))
-
-# Минимальное количество касаний уровня / Minimum touches for a valid level
-MIN_TOUCHES = int(os.getenv("MIN_TOUCHES", "5"))
-
-# Толерантность при поиске касаний (в процентах) / Touch tolerance (percent)
-TOLERANCE_PERCENT = float(os.getenv("TOLERANCE_PERCENT", "0.8"))
-
-# Размер окна для поиска локальных экстремумов / Local extrema window size
-EXTREMA_WINDOW = int(os.getenv("EXTREMA_WINDOW", "8"))
-
-# Топ N самых сильных уровней / Top N strongest levels
-TOP_N_LEVELS = int(os.getenv("TOP_N_LEVELS", "5"))
-
-# Минимальный промежуток между касаниями (в свечах) / Min candles between consecutive touches
-MIN_TOUCH_SPACING = int(os.getenv("MIN_TOUCH_SPACING", "3"))
-
-# Минимальный возраст уровня (свечей от конца данных) / Min level age (candles from data end)
+TIMEFRAME             = os.getenv("TIMEFRAME", "4h")
+CANDLES_LIMIT         = int(os.getenv("CANDLES_LIMIT", "250"))
+MIN_TOUCHES           = int(os.getenv("MIN_TOUCHES", "5"))
+TOLERANCE_PERCENT     = float(os.getenv("TOLERANCE_PERCENT", "0.8"))
+EXTREMA_WINDOW        = int(os.getenv("EXTREMA_WINDOW", "8"))
+TOP_N_LEVELS          = int(os.getenv("TOP_N_LEVELS", "5"))
+MIN_TOUCH_SPACING     = int(os.getenv("MIN_TOUCH_SPACING", "3"))
 LEVEL_AGE_MIN_CANDLES = int(os.getenv("LEVEL_AGE_MIN_CANDLES", "10"))
-
-# Множитель среднего объёма для засчитывания касания (0 = фильтр отключён) /
-# Avg-volume multiplier required at touch (0 = disabled)
 VOLUME_TOUCH_MULTIPLIER = float(os.getenv("VOLUME_TOUCH_MULTIPLIER", "1.2"))
+REQUIRE_RETEST        = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
 
-# Требовать ретест после пробоя / Require retest after breakout
-REQUIRE_RETEST = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
-
-# --- Точки входа / Entry signals ---
-# Порог близости к уровню для генерации сигнала (%) / Proximity to level for entry signal (%)
 ENTRY_PROXIMITY_PERCENT = float(os.getenv("ENTRY_PROXIMITY_PERCENT", "0.5"))
+EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
+AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "10"))
 
-# Период EMA для определения тренда / EMA period for trend filter
-EMA_PERIOD = int(os.getenv("EMA_PERIOD", "200"))
+DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
+RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "1"))
 
-# Автоматически брать топ N пар по объёму (0 = использовать TRADING_PAIRS) /
-# Auto-fetch top N pairs by 24h volume (0 = use TRADING_PAIRS)
-AUTO_TOP_PAIRS = int(os.getenv("AUTO_TOP_PAIRS", "10"))
+# --- Paper trading ---
+INITIAL_BALANCE      = float(os.getenv("INITIAL_BALANCE", "1000"))
+TRADE_SIZE_PERCENT   = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
+MAX_OPEN_TRADES      = int(os.getenv("MAX_OPEN_TRADES", "5"))
 
-# Задержка между анализом пар (сек) / Delay between pairs (sec)
-DELAY_BETWEEN_PAIRS = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
-
-# Интервал между полными прогонами (часы) / Interval between full runs (hours)
-# 0 = одноразовый запуск / 0 = run once and exit
-RUN_INTERVAL_HOURS = float(os.getenv("RUN_INTERVAL_HOURS", "1"))
 
 # ============================================================
-# ЛОГИРОВАНИЕ / LOGGING
+# ЛОГИРОВАНИЕ
 # ============================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -127,40 +93,36 @@ logger = logging.getLogger("signaler")
 
 
 # ============================================================
-# ПРОВЕРКА КОНФИГА / CONFIG VALIDATION
+# ГЛОБАЛЬНЫЙ ПОРТФЕЛЬ
+# ============================================================
+portfolio = PaperPortfolio(
+    initial_balance=INITIAL_BALANCE,
+    trade_size_percent=TRADE_SIZE_PERCENT,
+    max_open_trades=MAX_OPEN_TRADES,
+)
+
+
+# ============================================================
+# ПРОВЕРКА КОНФИГА
 # ============================================================
 def validate_config() -> None:
-    """Проверка, что все обязательные поля заполнены."""
     missing = []
-    if not MEXC_API_KEY:
-        missing.append("MEXC_API_KEY")
-    if not MEXC_SECRET_KEY:
-        missing.append("MEXC_SECRET_KEY")
-    if not TELEGRAM_BOT_TOKEN:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if not TELEGRAM_CHAT_ID:
-        missing.append("TELEGRAM_CHAT_ID")
-    if not TRADING_PAIRS:
-        missing.append("TRADING_PAIRS")
-
+    if not MEXC_API_KEY:       missing.append("MEXC_API_KEY")
+    if not MEXC_SECRET_KEY:    missing.append("MEXC_SECRET_KEY")
+    if not TELEGRAM_BOT_TOKEN: missing.append("TELEGRAM_BOT_TOKEN")
+    if not TELEGRAM_CHAT_ID:   missing.append("TELEGRAM_CHAT_ID")
+    if not TRADING_PAIRS and AUTO_TOP_PAIRS <= 0:
+        missing.append("TRADING_PAIRS (или установи AUTO_TOP_PAIRS > 0)")
     if missing:
-        logger.error(
-            "Не заполнены обязательные поля конфига: %s",
-            ", ".join(missing),
-        )
+        logger.error("Не заполнены обязательные поля: %s", ", ".join(missing))
         sys.exit(1)
-
-    logger.info("Конфиг проверен: все поля заполнены.")
+    logger.info("Конфиг проверен.")
 
 
 # ============================================================
 # MEXC CLIENT
 # ============================================================
 def get_mexc_client() -> ccxt.mexc:
-    """
-    Создать и проверить подключение к MEXC.
-    Create and verify MEXC connection.
-    """
     logger.info("Подключение к MEXC...")
     try:
         client = ccxt.mexc({
@@ -169,9 +131,8 @@ def get_mexc_client() -> ccxt.mexc:
             "enableRateLimit": True,
             "options": {"defaultType": "spot"},
         })
-        # Загружаем рынки чтобы убедиться в работоспособности
         client.load_markets()
-        logger.info("Подключение к MEXC установлено. Рынков: %d", len(client.markets))
+        logger.info("MEXC подключён. Рынков: %d", len(client.markets))
         return client
     except ccxt.AuthenticationError as exc:
         logger.error("Ошибка авторизации MEXC: %s", exc)
@@ -182,7 +143,7 @@ def get_mexc_client() -> ccxt.mexc:
 
 
 def fetch_top_pairs(client: ccxt.mexc, n: int = 10) -> List[str]:
-    """Получить топ-N USDT пар по объёму торгов за 24ч."""
+    """Получить топ-N USDT пар по объёму за 24ч."""
     logger.info("Получение топ-%d пар по объёму...", n)
     try:
         tickers = client.fetch_tickers()
@@ -205,55 +166,31 @@ def fetch_ohlcv(
     timeframe: str = TIMEFRAME,
     limit: int = CANDLES_LIMIT,
 ) -> Optional[pd.DataFrame]:
-    """
-    Скачать исторические свечи (OHLCV).
-    Fetch historical OHLCV candles.
-
-    Returns DataFrame с колонками: timestamp, open, high, low, close, volume.
-    """
     logger.info("Загрузка %d свечей %s для %s...", limit, timeframe, symbol)
     try:
         raw = client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         if not raw:
             logger.warning("Пустой ответ для %s", symbol)
             return None
-
-        df = pd.DataFrame(
-            raw,
-            columns=["timestamp", "open", "high", "low", "close", "volume"],
-        )
+        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        # Валидация: нужно достаточно данных для анализа
         if len(df) < EXTREMA_WINDOW * 2 + 1:
             logger.warning("Слишком мало свечей для %s: %d", symbol, len(df))
             return None
-
         logger.info("Получено %d свечей для %s", len(df), symbol)
         return df
     except ccxt.BadSymbol:
         logger.error("Пара %s не найдена на MEXC", symbol)
         return None
     except Exception as exc:
-        logger.error("Ошибка при загрузке OHLCV для %s: %s", symbol, exc)
+        logger.error("Ошибка загрузки OHLCV для %s: %s", symbol, exc)
         return None
 
 
 # ============================================================
-# ПОИСК УРОВНЕЙ / LEVEL DETECTION
+# ПОИСК УРОВНЕЙ
 # ============================================================
-def _find_local_extrema(
-    series: pd.Series,
-    window: int,
-    kind: str,
-) -> List[tuple]:
-    """
-    Найти локальные максимумы/минимумы в серии.
-    Find local maxima/minima within a rolling window.
-
-    Returns list of (price, index) tuples.
-    kind: 'max' -> локальные максимумы (сопротивление)
-          'min' -> локальные минимумы (поддержка)
-    """
+def _find_local_extrema(series: pd.Series, window: int, kind: str) -> List[tuple]:
     values = series.values
     extrema = []
     for i in range(window, len(values) - window):
@@ -273,62 +210,34 @@ def _count_touches(
     min_spacing: int = 0,
     volume_multiplier: float = 0.0,
 ) -> int:
-    """
-    Посчитать количество касаний цены к уровню.
-    Count how many times price touched a level (within tolerance).
-
-    Критерии качества касания:
-    - min_spacing: минимальный промежуток между касаниями (в свечах)
-    - volume_multiplier: засчитывается только при объёме >= avg * multiplier
-    """
     upper = level * (1 + tolerance)
     lower = level * (1 - tolerance)
     avg_volume = df["volume"].mean()
-
     touch_indices = []
     for i in range(len(df)):
-        high = df["high"].iat[i]
-        low = df["low"].iat[i]
+        high, low = df["high"].iat[i], df["low"].iat[i]
         if not ((lower <= high <= upper) or (lower <= low <= upper)):
             continue
         if volume_multiplier > 0 and df["volume"].iat[i] < avg_volume * volume_multiplier:
             continue
         touch_indices.append(i)
-
     if not touch_indices:
         return 0
-
     if min_spacing <= 0:
         return len(touch_indices)
-
-    # Оставляем только касания, разделённые минимальным промежутком
     filtered = [touch_indices[0]]
     for idx in touch_indices[1:]:
         if idx - filtered[-1] >= min_spacing:
             filtered.append(idx)
-
     return len(filtered)
 
 
 def _has_retest_after_breakout(
-    level: float,
-    df: pd.DataFrame,
-    tolerance: float,
-    level_type: str,
+    level: float, df: pd.DataFrame, tolerance: float, level_type: str
 ) -> bool:
-    """
-    Проверить, был ли ретест уровня после его пробоя.
-    Check if there was a retest of the level after a breakout.
-
-    Пробой: свеча закрывается за пределами зоны уровня.
-    Ретест: после пробоя цена возвращается к зоне уровня.
-    """
     upper = level * (1 + tolerance)
     lower = level * (1 - tolerance)
-    closes = df["close"].values
-    highs = df["high"].values
-    lows = df["low"].values
-
+    closes, highs, lows = df["close"].values, df["high"].values, df["low"].values
     in_breakout = False
     for i in range(len(closes)):
         if not in_breakout:
@@ -339,45 +248,25 @@ def _has_retest_after_breakout(
         else:
             if (lower <= highs[i] <= upper) or (lower <= lows[i] <= upper):
                 return True
-            # Ложный пробой — цена вернулась на исходную сторону
             if level_type == "SUPPORT" and closes[i] > upper:
                 in_breakout = False
             elif level_type == "RESISTANCE" and closes[i] < lower:
                 in_breakout = False
-
     return False
 
 
-def remove_duplicates(
-    levels: List[Dict],
-    tolerance: float,
-) -> List[Dict]:
-    """
-    Удалить близкие дубликаты уровней.
-    Remove near-duplicate levels (within tolerance).
-
-    Сортируем по силе (touches), оставляем самые сильные.
-    """
+def remove_duplicates(levels: List[Dict], tolerance: float) -> List[Dict]:
     if not levels:
         return []
-
-    # Сортируем по силе (по убыванию)
     sorted_levels = sorted(levels, key=lambda x: x["touches"], reverse=True)
     unique: List[Dict] = []
-
     for level in sorted_levels:
-        is_duplicate = False
-        for kept in unique:
-            # Если уровень слишком близко к уже сохранённому того же типа — пропускаем
-            if kept["type"] != level["type"]:
-                continue
-            diff = abs(level["price"] - kept["price"]) / kept["price"]
-            if diff < tolerance:
-                is_duplicate = True
-                break
-        if not is_duplicate:
+        if not any(
+            kept["type"] == level["type"]
+            and abs(level["price"] - kept["price"]) / kept["price"] < tolerance
+            for kept in unique
+        ):
             unique.append(level)
-
     return unique
 
 
@@ -392,112 +281,68 @@ def find_support_resistance(
     volume_multiplier: float = VOLUME_TOUCH_MULTIPLIER,
     require_retest: bool = REQUIRE_RETEST,
 ) -> List[Dict]:
-    """
-    Найти уровни поддержки и сопротивления.
-    Find support and resistance levels.
-
-    Алгоритм:
-    1. Находим локальные максимумы/минимумы (кандидаты в уровни).
-    2. Фильтруем слишком молодые уровни (level_age_min).
-    3. Считаем касания с учётом промежутка во времени и объёма.
-    4. Отфильтровываем уровни с touches < min_touches.
-    5. Опционально: требуем ретест после пробоя (require_retest).
-    6. Удаляем дубликаты, берём топ-N.
-    """
     tolerance = tolerance_percent / 100.0
     total_candles = len(df)
-
     resistance_candidates = _find_local_extrema(df["high"], window, "max")
-    support_candidates = _find_local_extrema(df["low"], window, "min")
-
+    support_candidates    = _find_local_extrema(df["low"],  window, "min")
     logger.info(
-        "Кандидатов: сопротивление=%d, поддержка=%d",
-        len(resistance_candidates),
-        len(support_candidates),
+        "Кандидатов: сопр.=%d, подд.=%d",
+        len(resistance_candidates), len(support_candidates),
     )
-
     levels: List[Dict] = []
-
     for candidates, level_type in [
         (resistance_candidates, "RESISTANCE"),
-        (support_candidates, "SUPPORT"),
+        (support_candidates,    "SUPPORT"),
     ]:
         for price, idx in candidates:
-            # Критерий возраста: уровень должен быть сформирован достаточно давно
-            age = total_candles - 1 - idx
-            if age < level_age_min:
+            if total_candles - 1 - idx < level_age_min:
                 continue
-
-            touches = _count_touches(
-                price, df, tolerance,
-                min_spacing=min_touch_spacing,
-                volume_multiplier=volume_multiplier,
-            )
+            touches = _count_touches(price, df, tolerance,
+                                     min_spacing=min_touch_spacing,
+                                     volume_multiplier=volume_multiplier)
             if touches < min_touches:
                 continue
-
             has_retest = _has_retest_after_breakout(price, df, tolerance, level_type)
             if require_retest and not has_retest:
                 continue
-
-            levels.append({
-                "price": price,
-                "type": level_type,
-                "touches": touches,
-                "has_retest": has_retest,
-            })
-
+            levels.append({"price": price, "type": level_type,
+                           "touches": touches, "has_retest": has_retest})
     levels = remove_duplicates(levels, tolerance)
     levels = sorted(levels, key=lambda x: x["touches"], reverse=True)[:top_n]
     levels = sorted(levels, key=lambda x: x["price"], reverse=True)
-
     logger.info("Найдено уровней: %d", len(levels))
     return levels
 
 
 # ============================================================
-# ТОЧКИ ВХОДА / ENTRY SIGNALS
+# ТОЧКИ ВХОДА
 # ============================================================
 def _calc_ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
 def _detect_candle_pattern(df: pd.DataFrame) -> Optional[str]:
-    """Определить паттерн на последней завершённой свече."""
     if len(df) < 3:
         return None
-
-    c = df.iloc[-2]     # последняя завершённая (текущая ещё формируется)
+    c = df.iloc[-2]
     prev = df.iloc[-3]
-
     o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
     total_range = h - l
     if total_range == 0:
         return None
-
     body = abs(cl - o)
     upper_wick = h - max(o, cl)
     lower_wick = min(o, cl) - l
     body_ratio = body / total_range
-
-    # Молот (бычий пин-бар)
     if body_ratio < 0.3 and lower_wick / total_range > 0.6 and lower_wick > 2 * upper_wick:
         return "молот 🔨"
-
-    # Падающая звезда (медвежий пин-бар)
     if body_ratio < 0.3 and upper_wick / total_range > 0.6 and upper_wick > 2 * lower_wick:
         return "падающая звезда ⭐"
-
     p_o, p_cl = float(prev["open"]), float(prev["close"])
-
-    # Бычье поглощение
     if p_cl < p_o and cl > o and o <= p_cl and cl >= p_o:
         return "бычье поглощение 🕯"
-
-    # Медвежье поглощение
     if p_cl > p_o and cl < o and o >= p_cl and cl <= p_o:
         return "медвежье поглощение 🕯"
-
     return None
 
 
@@ -509,55 +354,36 @@ def find_entry_signals(
     ema_period: int = EMA_PERIOD,
     tolerance_percent: float = TOLERANCE_PERCENT,
 ) -> List[Dict]:
-    """
-    Найти точки входа вблизи уровней.
-
-    Критерии (все три должны совпасть):
-    1. Цена в пределах proximity_percent% от уровня.
-    2. Тренд по EMA: LONG только выше EMA, SHORT только ниже.
-    3. Паттерн свечи (необязателен, но отображается если есть).
-
-    Каждый сигнал содержит SL, TP и соотношение R:R.
-    """
     if ema_period >= len(df):
-        logger.warning("Недостаточно свечей для EMA%d (%d свечей)", ema_period, len(df))
+        logger.warning("Недостаточно свечей для EMA%d (%d)", ema_period, len(df))
         return []
-
     proximity = proximity_percent / 100.0
     tolerance = tolerance_percent / 100.0
-
-    ema_val = float(_calc_ema(df["close"], ema_period).iloc[-1])
+    ema_val   = float(_calc_ema(df["close"], ema_period).iloc[-1])
     ema_trend = "UP" if current_price > ema_val else "DOWN"
-    pattern = _detect_candle_pattern(df)
-
+    pattern   = _detect_candle_pattern(df)
     signals = []
     for lvl in levels:
-        level_price = lvl["price"]
-        distance = abs(current_price - level_price) / level_price
+        distance = abs(current_price - lvl["price"]) / lvl["price"]
         if distance > proximity:
             continue
-
         if lvl["type"] == "SUPPORT" and ema_trend == "UP":
             direction = "LONG"
         elif lvl["type"] == "RESISTANCE" and ema_trend == "DOWN":
             direction = "SHORT"
         else:
             continue
-
-        sl = (level_price * (1 - tolerance * 2) if direction == "LONG"
-              else level_price * (1 + tolerance * 2))
-
+        sl = (lvl["price"] * (1 - tolerance * 2) if direction == "LONG"
+              else lvl["price"] * (1 + tolerance * 2))
         if direction == "LONG":
             targets = [l for l in levels if l["type"] == "RESISTANCE" and l["price"] > current_price]
             tp = min(targets, key=lambda x: x["price"])["price"] if targets else None
         else:
             targets = [l for l in levels if l["type"] == "SUPPORT" and l["price"] < current_price]
             tp = max(targets, key=lambda x: x["price"])["price"] if targets else None
-
-        risk = abs(current_price - sl)
+        risk   = abs(current_price - sl)
         reward = abs(tp - current_price) if tp is not None else None
-        rr = round(reward / risk, 1) if reward and risk > 0 else None
-
+        rr     = round(reward / risk, 1) if reward and risk > 0 else None
         signals.append({
             "direction": direction,
             "level": lvl,
@@ -569,40 +395,32 @@ def find_entry_signals(
             "tp": tp,
             "rr": rr,
         })
-
     return signals
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM — отправка
 # ============================================================
-async def send_telegram_message(bot: Bot, text: str) -> bool:
-    """
-    Отправить HTML-сообщение в Telegram.
-    Send an HTML message to Telegram chat.
-    """
+async def send_msg(bot: Bot, text: str, reply_markup=None) -> bool:
     try:
         await bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=text,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
+            reply_markup=reply_markup,
         )
-        logger.info("Сообщение отправлено в Telegram")
         return True
     except TelegramError as exc:
         logger.error("Ошибка Telegram: %s", exc)
         return False
-    except Exception as exc:
-        logger.error("Неожиданная ошибка Telegram: %s", exc)
-        return False
 
 
 # ============================================================
-# ФОРМАТИРОВАНИЕ СООБЩЕНИЯ / MESSAGE FORMATTING
+# ФОРМАТИРОВАНИЕ СООБЩЕНИЙ
 # ============================================================
-def _format_price(price: float) -> str:
-    """Форматирование цены с адаптивной точностью."""
+def _fp(price: float) -> str:
+    """Адаптивное форматирование цены."""
     if price >= 1000:
         return f"{price:,.2f}"
     if price >= 1:
@@ -610,209 +428,300 @@ def _format_price(price: float) -> str:
     return f"{price:.8f}"
 
 
-def format_message(
+_MENU = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+        InlineKeyboardButton("📋 Лог сделок", callback_data="log"),
+    ]
+])
+
+
+def fmt_analysis(
     pair: str,
     timeframe: str,
     current_price: float,
     levels: List[Dict],
     signals: List[Dict],
 ) -> str:
-    """Форматирует HTML-сообщение для Telegram."""
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-
     lines = [
         f"📊 <b>{pair}</b>  •  <code>{timeframe}</code>",
-        f"💰 Текущая цена: <b>{_format_price(current_price)}</b>",
-        f"🕒 {now}",
-        "",
+        f"💰 Цена: <b>{_fp(current_price)}</b>",
+        f"🕒 {now}", "",
     ]
-
-    # --- Блок сигналов входа ---
     if signals:
         lines.append("🎯 <b>СИГНАЛЫ ВХОДА:</b>")
         for sig in signals:
             lvl = sig["level"]
-            dir_emoji = "📈" if sig["direction"] == "LONG" else "📉"
-            trend_arrow = "↑" if sig["ema_trend"] == "UP" else "↓"
+            de  = "📈" if sig["direction"] == "LONG" else "📉"
+            ta  = "↑" if sig["ema_trend"] == "UP" else "↓"
             lines.append(
-                f"{dir_emoji} <b>{sig['direction']}</b>  вблизи {_format_price(lvl['price'])}"
-                f"  <i>({sig['distance_percent']}% от цены)</i>"
+                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}"
+                f"  <i>({sig['distance_percent']}%)</i>"
             )
-            lines.append(
-                f"   Тренд: {trend_arrow} EMA{EMA_PERIOD} = {_format_price(sig['ema'])}"
-            )
+            lines.append(f"   Тренд: {ta} EMA{EMA_PERIOD} = {_fp(sig['ema'])}")
             if sig["pattern"]:
                 lines.append(f"   Паттерн: {sig['pattern']}")
-            tp_str = _format_price(sig["tp"]) if sig["tp"] else "—"
+            tp_str = _fp(sig["tp"]) if sig["tp"] else "—"
             rr_str = f"  •  R:R 1:{sig['rr']}" if sig["rr"] else ""
-            lines.append(
-                f"   SL: <b>{_format_price(sig['sl'])}</b>"
-                f"  •  TP: <b>{tp_str}</b>{rr_str}"
-            )
+            lines.append(f"   SL: <b>{_fp(sig['sl'])}</b>  •  TP: <b>{tp_str}</b>{rr_str}")
         lines.append("")
     else:
-        lines.append("⏳ <i>Сигналов нет — цена далеко от уровней.</i>")
-        lines.append("")
+        lines += ["⏳ <i>Сигналов нет — цена далеко от уровней.</i>", ""]
 
-    # --- Блок уровней ---
     if not levels:
-        lines.append("⚠️ <i>Уровни не найдены (недостаточно касаний).</i>")
+        lines.append("⚠️ <i>Уровни не найдены.</i>")
         return "\n".join(lines)
 
-    lines.append("<b>Уровни поддержки и сопротивления:</b>")
+    lines.append("<b>Уровни:</b>")
     for lvl in levels:
-        emoji = "🔴" if lvl["type"] == "RESISTANCE" else "🟢"
+        emoji   = "🔴" if lvl["type"] == "RESISTANCE" else "🟢"
         ru_type = "Сопр." if lvl["type"] == "RESISTANCE" else "Подд."
-        distance = (lvl["price"] - current_price) / current_price * 100
-        sign = "+" if distance >= 0 else ""
-        retest_mark = " ✅" if lvl.get("has_retest") else ""
+        dist    = (lvl["price"] - current_price) / current_price * 100
+        sign    = "+" if dist >= 0 else ""
+        retest  = " ✅" if lvl.get("has_retest") else ""
         lines.append(
-            f"{emoji} <b>{_format_price(lvl['price'])}</b> — {ru_type} "
-            f"(касаний: <b>{lvl['touches']}</b>, {sign}{distance:.2f}%{retest_mark})"
+            f"{emoji} <b>{_fp(lvl['price'])}</b> — {ru_type} "
+            f"(касаний: <b>{lvl['touches']}</b>, {sign}{dist:.2f}%{retest})"
         )
+    return "\n".join(lines)
 
+
+def fmt_trade_opened(trade: Dict, balance: float) -> str:
+    de  = "📈" if trade["direction"] == "LONG" else "📉"
+    rr  = f"  •  R:R 1:{trade['rr']}" if trade["rr"] else ""
+    return (
+        f"{de} <b>СДЕЛКА ОТКРЫТА #{trade['id']}</b>\n"
+        f"<b>{trade['pair']}</b>  •  {trade['direction']}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Вход:  <b>{_fp(trade['entry_price'])}</b>\n"
+        f"SL:    <b>{_fp(trade['sl'])}</b>  (-{trade['risk_pct']}%)\n"
+        f"TP:    <b>{_fp(trade['tp'])}</b>  (+{trade['reward_pct']}%)\n"
+        f"Размер: <b>${trade['size_usd']}</b>{rr}\n"
+        f"Баланс: ${balance:,.2f}"
+    )
+
+
+def fmt_trade_closed(trade: Dict, balance: float) -> str:
+    won    = (trade["pnl_usd"] or 0) > 0
+    emoji  = "✅" if won else "❌"
+    reason = "ТЕЙК-ПРОФИТ 🎯" if trade["close_reason"] == "TP" else "СТОП-ЛОСС 🛑"
+    sign   = "+" if (trade["pnl_usd"] or 0) >= 0 else ""
+    return (
+        f"{emoji} <b>{reason} #{trade['id']}</b>\n"
+        f"<b>{trade['pair']}</b>  •  {trade['direction']}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Вход: {_fp(trade['entry_price'])} → Закрыт: <b>{_fp(trade['close_price'])}</b>\n"
+        f"P&L: <b>{sign}${trade['pnl_usd']}  ({sign}{trade['pnl_percent']}%)</b>\n"
+        f"Баланс: <b>${balance:,.2f}</b>"
+    )
+
+
+def fmt_stats(ptf: PaperPortfolio) -> str:
+    s    = ptf.get_stats()
+    sign = "+" if s["balance_change_pct"] >= 0 else ""
+    ps   = "+" if s["total_pnl"] >= 0 else ""
+    lines = [
+        "📊 <b>СТАТИСТИКА ПОРТФЕЛЯ</b>", "",
+        f"💰 Баланс: <b>${s['balance']:,.2f}</b>  ({sign}{s['balance_change_pct']}%)",
+        f"🏦 Начальный: ${s['initial_balance']:,.2f}",
+        f"📂 Открытых позиций: <b>{s['open_count']}</b>", "",
+        f"📈 Всего закрыто: <b>{s['total_closed']}</b>",
+        f"  ✅ Прибыльных: <b>{s['wins']}</b>  ({s['winrate']}% winrate)",
+        f"  ❌ Убыточных:  <b>{s['losses']}</b>", "",
+        f"💵 Итоговый P&L: <b>{ps}${s['total_pnl']:,.2f}</b>",
+    ]
+    if s["best"]:
+        b = s["best"]
+        lines.append(f"🏆 Лучшая:  <b>+${b['pnl_usd']}</b>  ({b['pair']} {b['direction']})")
+    if s["worst"]:
+        w = s["worst"]
+        lines.append(f"💔 Худшая:  <b>${w['pnl_usd']}</b>  ({w['pair']} {w['direction']})")
+    return "\n".join(lines)
+
+
+def fmt_log(ptf: PaperPortfolio, n: int = 10) -> str:
+    trades = ptf.recent_trades(n)
+    if not trades:
+        return "📋 <b>Лог сделок</b>\n\n<i>Закрытых сделок пока нет.</i>"
+    lines = [f"📋 <b>Последние {len(trades)} сделок:</b>", ""]
+    for i, t in enumerate(trades, 1):
+        pnl  = t["pnl_usd"] or 0
+        em   = "✅" if pnl > 0 else "❌"
+        sign = "+" if pnl >= 0 else ""
+        rsn  = "TP" if t["close_reason"] == "TP" else "SL"
+        lines.append(
+            f"{i}. {em} <b>{t['pair']}</b> {t['direction']} [{rsn}]  "
+            f"<b>{sign}${t['pnl_usd']}</b> ({sign}{t['pnl_percent']}%)"
+        )
+        lines.append(
+            f"   {_fp(t['entry_price'])} → {_fp(t['close_price'])}"
+            f"  •  {(t['closed_at'] or '')[:16]}"
+        )
     return "\n".join(lines)
 
 
 # ============================================================
-# АНАЛИЗ ПАРЫ / PAIR ANALYSIS
+# АНАЛИЗ ПАРЫ (с бумажной торговлей)
 # ============================================================
 async def analyze_pair(
     client: ccxt.mexc,
     bot: Bot,
     pair: str,
 ) -> None:
-    """
-    Полный цикл анализа одной торговой пары.
-    Full analysis pipeline for one trading pair.
-    """
-    logger.info("=" * 50)
-    logger.info("Анализ пары: %s", pair)
+    logger.info("Анализ: %s", pair)
 
     df = fetch_ohlcv(client, pair, TIMEFRAME, CANDLES_LIMIT)
     if df is None or df.empty:
         logger.warning("Пропускаем %s (нет данных)", pair)
-        await send_telegram_message(
-            bot,
-            f"⚠️ <b>{pair}</b>: не удалось загрузить данные.",
-        )
         return
 
     current_price = float(df["close"].iloc[-1])
-    logger.info("Текущая цена %s: %s", pair, _format_price(current_price))
 
-    levels = find_support_resistance(df)
+    # 1. Проверяем SL/TP по последней ЗАВЕРШЁННОЙ свече
+    last = df.iloc[-2]
+    for trade in portfolio.check_sl_tp(pair, float(last["high"]), float(last["low"])):
+        await send_msg(bot, fmt_trade_closed(trade, portfolio.balance))
+
+    # 2. Уровни и сигналы
+    levels  = find_support_resistance(df)
     signals = find_entry_signals(df, levels, current_price)
 
-    for lvl in levels:
-        logger.info("  %s @ %s (touches=%d)", lvl["type"], _format_price(lvl["price"]), lvl["touches"])
+    # 3. Аналитическое сообщение
+    await send_msg(bot, fmt_analysis(pair, TIMEFRAME, current_price, levels, signals))
+
+    # 4. Открываем сделки по сигналам (только если есть TP)
     for sig in signals:
-        logger.info(
-            "  СИГНАЛ %s @ %s → SL %s, TP %s, R:R %s",
-            sig["direction"], _format_price(current_price),
-            _format_price(sig["sl"]),
-            _format_price(sig["tp"]) if sig["tp"] else "—",
-            sig["rr"],
+        if sig["tp"] is None:
+            continue
+        trade = portfolio.open_trade(
+            pair=pair,
+            direction=sig["direction"],
+            entry_price=current_price,
+            sl=sig["sl"],
+            tp=sig["tp"],
         )
-    if not levels:
-        logger.info("Для %s уровни не найдены.", pair)
+        if trade:
+            await send_msg(bot, fmt_trade_opened(trade, portfolio.balance))
 
-    message = format_message(pair, TIMEFRAME, current_price, levels, signals)
-    # Дублируем в консоль для удобства
-    print("\n" + "-" * 50)
-    print(message.replace("<b>", "").replace("</b>", "")
-                 .replace("<code>", "").replace("</code>", "")
-                 .replace("<i>", "").replace("</i>", ""))
-    print("-" * 50 + "\n")
 
-    await send_telegram_message(bot, message)
+# ============================================================
+# TELEGRAM HANDLERS
+# ============================================================
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "👋 Я сигналер + бумажный трейдер. Используй кнопки ниже.",
+        reply_markup=_MENU,
+    )
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        fmt_stats(portfolio), parse_mode=ParseMode.HTML, reply_markup=_MENU,
+    )
+
+
+async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        fmt_log(portfolio), parse_mode=ParseMode.HTML, reply_markup=_MENU,
+    )
+
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "stats":
+        text = fmt_stats(portfolio)
+    elif query.data == "log":
+        text = fmt_log(portfolio)
+    else:
+        return
+    await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_MENU)
+
+
+# ============================================================
+# JOB: ПЕРИОДИЧЕСКИЙ АНАЛИЗ
+# ============================================================
+async def analysis_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    client = context.bot_data["client"]
+    bot    = context.bot
+
+    pairs = fetch_top_pairs(client, AUTO_TOP_PAIRS) if AUTO_TOP_PAIRS > 0 else TRADING_PAIRS
+    logger.info("=== Запуск анализа (%d пар) ===", len(pairs))
+
+    for idx, pair in enumerate(pairs):
+        try:
+            await analyze_pair(client, bot, pair)
+        except Exception as exc:
+            logger.error("Ошибка %s: %s", pair, exc)
+        if idx < len(pairs) - 1:
+            await asyncio.sleep(DELAY_BETWEEN_PAIRS)
+
+
+# ============================================================
+# СТАРТОВОЕ СООБЩЕНИЕ (post_init)
+# ============================================================
+async def post_init(app: Application) -> None:
+    pairs_mode = (f"топ-{AUTO_TOP_PAIRS} по объёму" if AUTO_TOP_PAIRS > 0
+                  else f"{len(TRADING_PAIRS)} пар из конфига")
+    mode = f"каждые {RUN_INTERVAL_HOURS}ч" if RUN_INTERVAL_HOURS > 0 else "одноразовый"
+
+    text = (
+        f"🚀 <b>Signaler + Paper Trading запущен</b>\n"
+        f"Пары: {pairs_mode}  •  TF: <code>{TIMEFRAME}</code>\n"
+        f"Режим: <b>{mode}</b>\n\n"
+        f"💰 Баланс: <b>${portfolio.balance:,.2f}</b>  "
+        f"(из ${portfolio.initial_balance:,.2f})\n"
+        f"Размер сделки: {TRADE_SIZE_PERCENT}%  •  Max открытых: {MAX_OPEN_TRADES}\n"
+        f"EMA: {EMA_PERIOD}  •  Entry proximity: {ENTRY_PROXIMITY_PERCENT}%\n\n"
+        f"Первый анализ через ~15 сек."
+    )
+    try:
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_MENU,
+        )
+    except TelegramError as exc:
+        logger.error("Ошибка стартового сообщения: %s", exc)
 
 
 # ============================================================
 # MAIN
 # ============================================================
-async def run_once(client: ccxt.mexc, bot: Bot, pairs: List[str]) -> None:
-    """Один полный прогон по списку пар."""
-    for idx, pair in enumerate(pairs):
-        try:
-            await analyze_pair(client, bot, pair)
-        except Exception as exc:
-            logger.error("Ошибка при анализе %s: %s", pair, exc)
-            await send_telegram_message(
-                bot,
-                f"❌ <b>{pair}</b>: ошибка анализа — <code>{exc}</code>",
-            )
-        if idx < len(pairs) - 1:
-            await asyncio.sleep(DELAY_BETWEEN_PAIRS)
-
-
-async def run() -> None:
-    """Главная асинхронная функция."""
+def main() -> None:
     validate_config()
 
     try:
         client = get_mexc_client()
     except Exception:
-        logger.error("Невозможно продолжить без подключения к MEXC.")
+        logger.error("Невозможно подключиться к MEXC.")
         return
 
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app.bot_data["client"] = client
 
-    # Стартовое сообщение (отправляется один раз при старте)
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("log",   cmd_log))
+    app.add_handler(CallbackQueryHandler(button_callback))
+
+    interval_sec = int(RUN_INTERVAL_HOURS * 3600)
+    if interval_sec > 0:
+        app.job_queue.run_repeating(analysis_job, interval=interval_sec, first=15)
+    else:
+        app.job_queue.run_once(analysis_job, when=15)
+
+    logger.info("Бот запущен, анализ каждые %.1fч.", RUN_INTERVAL_HOURS)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
     try:
-        me = await bot.get_me()
-        logger.info("Telegram бот: @%s", me.username)
-    except TelegramError as exc:
-        logger.error("Не удалось подключиться к Telegram: %s", exc)
-        return
-
-    interval_seconds = int(RUN_INTERVAL_HOURS * 3600)
-    mode = "одноразовый" if interval_seconds <= 0 else f"каждые {RUN_INTERVAL_HOURS}ч"
-    pairs_mode = (f"топ-{AUTO_TOP_PAIRS} по объёму" if AUTO_TOP_PAIRS > 0
-                  else f"{len(TRADING_PAIRS)} пар из конфига")
-
-    start_msg = (
-        f"🚀 <b>Signaler запущен</b>\n"
-        f"Пары: {pairs_mode}  •  TF: <code>{TIMEFRAME}</code>\n"
-        f"Режим: <b>{mode}</b>\n"
-        f"Min touches: {MIN_TOUCHES}  •  Tolerance: {TOLERANCE_PERCENT}%\n"
-        f"Touch spacing: {MIN_TOUCH_SPACING}св  •  Level age: {LEVEL_AGE_MIN_CANDLES}св\n"
-        f"Volume ×{VOLUME_TOUCH_MULTIPLIER}  •  Retest: {'вкл' if REQUIRE_RETEST else 'выкл'}\n"
-        f"Entry proximity: {ENTRY_PROXIMITY_PERCENT}%  •  EMA: {EMA_PERIOD}"
-    )
-    await send_telegram_message(bot, start_msg)
-
-    iteration = 0
-    while True:
-        iteration += 1
-        logger.info("========== Итерация #%d ==========", iteration)
-
-        pairs = fetch_top_pairs(client, AUTO_TOP_PAIRS) if AUTO_TOP_PAIRS > 0 else TRADING_PAIRS
-        await run_once(client, bot, pairs)
-
-        if interval_seconds <= 0:
-            logger.info("Одноразовый режим — завершаюсь.")
-            break
-
-        next_run = datetime.utcnow() + timedelta(seconds=interval_seconds)
-        logger.info(
-            "Следующая итерация через %.1fч (в %s UTC)",
-            RUN_INTERVAL_HOURS,
-            next_run.strftime("%Y-%m-%d %H:%M"),
-        )
-        await asyncio.sleep(interval_seconds)
-
-
-def main() -> None:
-    """Точка входа."""
-    try:
-        asyncio.run(run())
+        main()
     except KeyboardInterrupt:
         logger.info("Прервано пользователем.")
     except Exception as exc:
         logger.error("Фатальная ошибка: %s", exc)
         sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
