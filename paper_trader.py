@@ -6,6 +6,7 @@ State persists in trades.json and portfolio.json.
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("signaler.paper")
 
-_BASE = Path(__file__).parent
+_BASE = Path(os.getenv("DATA_DIR", str(Path(__file__).parent)))
 TRADES_FILE    = _BASE / "trades.json"
 PORTFOLIO_FILE = _BASE / "portfolio.json"
 
