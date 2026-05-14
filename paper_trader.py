@@ -160,6 +160,11 @@ class PaperPortfolio:
                 json.dumps(self.trades, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
+            if self.reports:
+                REPORTS_FILE.write_text(
+                    json.dumps(self.reports, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
         except Exception as exc:
             logger.error("Ошибка сохранения данных: %s", exc)
 
@@ -245,11 +250,13 @@ class PaperPortfolio:
         cancelled: List[Dict] = []
         remaining: List[Dict] = []
 
+        pair_had_orders = False
         for order in self.pending_orders:
             if order["pair"] != pair:
                 remaining.append(order)
                 continue
 
+            pair_had_orders = True
             order["checks_remaining"] -= 1
             hit = (
                 order["direction"] == "LONG"  and candle_low  <= order["entry_price"] or
@@ -274,7 +281,7 @@ class PaperPortfolio:
                 remaining.append(order)
 
         self.pending_orders = remaining
-        if triggered or cancelled:
+        if triggered or cancelled or pair_had_orders:
             self._save()
         return triggered, cancelled
 
