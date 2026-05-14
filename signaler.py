@@ -717,6 +717,9 @@ async def analyze_pair(
     triggered, cancelled = portfolio.check_pending_orders(pair, h, l)
     for trade in triggered:
         await send_msg(bot, fmt_pending_triggered(trade, portfolio.balance))
+        # Та же свеча могла пробить SL — проверяем сразу после открытия
+        for closed in portfolio.check_sl_tp(pair, h, l):
+            await send_msg(bot, fmt_trade_closed(closed, portfolio.balance))
     for order in cancelled:
         await send_msg(bot, fmt_pending_cancelled(order))
 
