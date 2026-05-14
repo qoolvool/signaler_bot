@@ -24,12 +24,14 @@ class PaperPortfolio:
         initial_balance: float = 1000.0,
         trade_size_percent: float = 2.0,
         max_open_trades: int = 5,
-        pending_expiry_checks: int = 8,   # cancel pending order after N checks without trigger
+        pending_expiry_checks: int = 8,
+        leverage: int = 1,
     ):
         self.initial_balance       = initial_balance
         self.trade_size_percent    = trade_size_percent
         self.max_open_trades       = max_open_trades
         self.pending_expiry_checks = pending_expiry_checks
+        self.leverage              = leverage
         self.balance: float        = initial_balance
         self.trades: List[Dict]    = []
         self.pending_orders: List[Dict] = []
@@ -119,6 +121,7 @@ class PaperPortfolio:
             return None
 
         size_usd   = round(self.balance * self.trade_size_percent / 100.0, 2)
+        notional   = round(size_usd * self.leverage, 2)
         risk_pct   = round(abs(entry_price - sl) / entry_price * 100, 2)
         reward_pct = round(abs(tp - entry_price) / entry_price * 100, 2)
         rr         = round(reward_pct / risk_pct, 1) if risk_pct > 0 else None
@@ -131,6 +134,8 @@ class PaperPortfolio:
             "sl":               sl,
             "tp":               tp,
             "size_usd":         size_usd,
+            "notional":         notional,
+            "leverage":         self.leverage,
             "risk_pct":         risk_pct,
             "reward_pct":       reward_pct,
             "rr":               rr,
@@ -205,6 +210,8 @@ class PaperPortfolio:
             "sl":           order["sl"],
             "tp":           order["tp"],
             "size_usd":     order["size_usd"],
+            "notional":     order["notional"],
+            "leverage":     order["leverage"],
             "risk_pct":     order["risk_pct"],
             "reward_pct":   order["reward_pct"],
             "rr":           order["rr"],
@@ -242,11 +249,13 @@ class PaperPortfolio:
         return closed
 
     def _close_trade(self, trade: Dict, close_price: float, reason: str) -> Dict:
+        leverage = trade.get("leverage", 1)
+        notional = trade.get("notional", trade["size_usd"])
         if trade["direction"] == "LONG":
-            pnl = (close_price - trade["entry_price"]) / trade["entry_price"] * trade["size_usd"]
+            pnl = (close_price - trade["entry_price"]) / trade["entry_price"] * notional
         else:
-            pnl = (trade["entry_price"] - close_price) / trade["entry_price"] * trade["size_usd"]
-        pnl_pct = pnl / trade["size_usd"] * 100
+            pnl = (trade["entry_price"] - close_price) / trade["entry_price"] * notional
+        pnl_pct = pnl / trade["size_usd"] * 100  # % от маржи
         trade.update(
             status="CLOSED", closed_at=_utcnow(), close_price=close_price,
             close_reason=reason, pnl_usd=round(pnl, 2), pnl_percent=round(pnl_pct, 2),

@@ -80,7 +80,8 @@ RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.5"))
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
 TRADE_SIZE_PERCENT     = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
 MAX_OPEN_TRADES        = int(os.getenv("MAX_OPEN_TRADES", "5"))
-PENDING_EXPIRY_CHECKS  = int(os.getenv("PENDING_EXPIRY_CHECKS", "8"))  # ~4h at 30min interval
+PENDING_EXPIRY_CHECKS  = int(os.getenv("PENDING_EXPIRY_CHECKS", "8"))
+LEVERAGE               = int(os.getenv("LEVERAGE", "10"))
 
 
 # ============================================================
@@ -103,6 +104,7 @@ portfolio = PaperPortfolio(
     trade_size_percent=TRADE_SIZE_PERCENT,
     max_open_trades=MAX_OPEN_TRADES,
     pending_expiry_checks=PENDING_EXPIRY_CHECKS,
+    leverage=LEVERAGE,
 )
 
 
@@ -522,6 +524,8 @@ def fmt_pending_created(order: Dict) -> str:
     de  = "📈" if order["direction"] == "LONG" else "📉"
     rr  = f"  •  R:R 1:{order['rr']}" if order["rr"] else ""
     chk = order["checks_remaining"]
+    lev = order.get("leverage", 1)
+    ntl = order.get("notional", order["size_usd"])
     return (
         f"⏳ <b>ЛИМИТНЫЙ ОРДЕР #{order['id']}</b>\n"
         f"{de} <b>{order['pair']}</b>  •  {order['direction']}\n"
@@ -529,7 +533,7 @@ def fmt_pending_created(order: Dict) -> str:
         f"Вход (лимит): <b>{_fp(order['entry_price'])}</b>\n"
         f"SL: <b>{_fp(order['sl'])}</b>  (-{order['risk_pct']}%)\n"
         f"TP: <b>{_fp(order['tp'])}</b>  (+{order['reward_pct']}%){rr}\n"
-        f"Размер: <b>${order['size_usd']}</b>\n"
+        f"Маржа: <b>${order['size_usd']}</b>  •  Плечо: <b>{lev}×</b>  •  Позиция: <b>${ntl}</b>\n"
         f"<i>Ждём касания уровня... (до {chk} проверок)</i>"
     )
 
@@ -719,7 +723,8 @@ async def post_init(app: Application) -> None:
         f"Режим: <b>{mode}</b>\n\n"
         f"💰 Баланс: <b>${portfolio.balance:,.2f}</b>  "
         f"(из ${portfolio.initial_balance:,.2f})\n"
-        f"Размер сделки: {TRADE_SIZE_PERCENT}%  •  Max открытых: {MAX_OPEN_TRADES}\n"
+        f"Маржа на сделку: {TRADE_SIZE_PERCENT}%  •  Плечо: <b>{LEVERAGE}×</b>  •  Max: {MAX_OPEN_TRADES}\n"
+        f"SL: {SL_PERCENT}%  •  TP: {TP_PERCENT}%  •  R:R 1:{round(TP_PERCENT/SL_PERCENT,1)}\n"
         f"EMA: {EMA_PERIOD}  •  Entry proximity: {ENTRY_PROXIMITY_PERCENT}%\n\n"
         f"Первый анализ через ~15 сек."
     )
