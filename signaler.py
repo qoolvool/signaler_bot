@@ -70,6 +70,8 @@ REQUIRE_RETEST        = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
 ENTRY_PROXIMITY_PERCENT = float(os.getenv("ENTRY_PROXIMITY_PERCENT", "0.5"))
 EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
 AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "20"))
+SL_PERCENT              = float(os.getenv("SL_PERCENT", "1.5"))  # стоп-лосс от цены входа
+TP_PERCENT              = float(os.getenv("TP_PERCENT", "3.0"))  # тейк-профит от цены входа
 
 DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
 RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.5"))
@@ -354,13 +356,13 @@ def find_entry_signals(
     current_price: float,
     proximity_percent: float = ENTRY_PROXIMITY_PERCENT,
     ema_period: int = EMA_PERIOD,
-    tolerance_percent: float = TOLERANCE_PERCENT,
+    sl_percent: float = SL_PERCENT,
+    tp_percent: float = TP_PERCENT,
 ) -> List[Dict]:
     if ema_period >= len(df):
         logger.warning("Недостаточно свечей для EMA%d (%d)", ema_period, len(df))
         return []
     proximity = proximity_percent / 100.0
-    tolerance = tolerance_percent / 100.0
     ema_val   = float(_calc_ema(df["close"], ema_period).iloc[-1])
     ema_trend = "UP" if current_price > ema_val else "DOWN"
     pattern   = _detect_candle_pattern(df)
@@ -375,17 +377,14 @@ def find_entry_signals(
             direction = "SHORT"
         else:
             continue
-        sl = (lvl["price"] * (1 - tolerance * 2) if direction == "LONG"
-              else lvl["price"] * (1 + tolerance * 2))
+        entry = lvl["price"]
         if direction == "LONG":
-            targets = [l for l in levels if l["type"] == "RESISTANCE" and l["price"] > current_price]
-            tp = min(targets, key=lambda x: x["price"])["price"] if targets else None
+            sl = entry * (1 - sl_percent / 100)
+            tp = entry * (1 + tp_percent / 100)
         else:
-            targets = [l for l in levels if l["type"] == "SUPPORT" and l["price"] < current_price]
-            tp = max(targets, key=lambda x: x["price"])["price"] if targets else None
-        risk   = abs(current_price - sl)
-        reward = abs(tp - current_price) if tp is not None else None
-        rr     = round(reward / risk, 1) if reward and risk > 0 else None
+            sl = entry * (1 + sl_percent / 100)
+            tp = entry * (1 - tp_percent / 100)
+        rr = round(tp_percent / sl_percent, 1)
         signals.append({
             "direction": direction,
             "level": lvl,
