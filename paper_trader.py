@@ -47,6 +47,7 @@ class PaperPortfolio:
         self._col_trades    = None
         self._col_reports   = None
         self.reports: Dict[str, Dict] = {}
+        self._live_prices: Dict[str, float] = {}
         self._connect_mongo()
         self._load()
 
@@ -168,6 +169,26 @@ class PaperPortfolio:
         except Exception as exc:
             logger.error("Ошибка сохранения данных: %s", exc)
 
+    # ── live prices / equity ─────────────────────────────────────────────────
+
+    def update_price(self, pair: str, price: float) -> None:
+        self._live_prices[pair] = price
+
+    def get_equity(self, prices: Optional[Dict[str, float]] = None) -> float:
+        p = prices if prices is not None else self._live_prices
+        unrealized = 0.0
+        for trade in self.open_trades:
+            cur = p.get(trade["pair"])
+            if cur is None:
+                continue
+            notional = trade.get("notional", trade["size_usd"])
+            if trade["direction"] == "LONG":
+                upnl = (cur - trade["entry_price"]) / trade["entry_price"] * notional
+            else:
+                upnl = (trade["entry_price"] - cur) / trade["entry_price"] * notional
+            unrealized += upnl
+        return round(self.balance + unrealized, 2)
+
     # ── queries ───────────────────────────────────────────────────────────────
 
     @property
@@ -267,11 +288,10 @@ class PaperPortfolio:
                 trade = self._make_trade(order)
                 self.trades.append(trade)
                 triggered.append(trade)
-                self.balance = round(self.balance - trade["size_usd"], 2)
                 logger.info(
-                    "Ордер #%s исполнен: %s %s @ %.6f | маржа -$%.2f | баланс $%.2f",
+                    "Ордер #%s исполнен: %s %s @ %.6f | баланс $%.2f",
                     trade["id"], trade["direction"], trade["pair"], trade["entry_price"],
-                    trade["size_usd"], self.balance,
+                    self.balance,
                 )
             elif order["checks_remaining"] <= 0:
                 cancelled.append(order)
@@ -349,7 +369,7 @@ class PaperPortfolio:
             status="CLOSED", closed_at=_utcnow(), close_price=close_price,
             close_reason=reason, pnl_usd=round(pnl, 2), pnl_percent=round(pnl_pct, 2),
         )
-        self.balance = round(self.balance + trade["size_usd"] + pnl, 2)
+        self.balance = round(self.balance + pnl, 2)
         self._save()
         logger.info(
             "Закрыта #%s %s %s: %s @ %.6f | PnL $%.2f (%.2f%%) | баланс $%.2f",
@@ -388,17 +408,19 @@ class PaperPortfolio:
 
     # ── statistics ────────────────────────────────────────────────────────────
 
-    def get_stats(self) -> Dict:
+    def get_stats(self, prices: Optional[Dict[str, float]] = None) -> Dict:
         closed    = self.closed_trades
         wins      = [t for t in closed if (t["pnl_usd"] or 0) > 0]
         losses    = [t for t in closed if (t["pnl_usd"] or 0) <= 0]
         total_pnl = sum(t["pnl_usd"] or 0 for t in closed)
         winrate   = len(wins) / len(closed) * 100 if closed else 0.0
-        bal_chg   = (self.balance - self.initial_balance) / self.initial_balance * 100
+        equity    = self.get_equity(prices)
+        bal_chg   = (equity - self.initial_balance) / self.initial_balance * 100
         best  = max(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
         worst = min(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
         return {
             "balance":            self.balance,
+            "equity":             equity,
             "initial_balance":    self.initial_balance,
             "balance_change_pct": round(bal_chg, 2),
             "open_count":         len(self.open_trades),

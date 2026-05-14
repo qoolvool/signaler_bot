@@ -524,7 +524,7 @@ def fmt_trade_opened(trade: Dict, balance: float) -> str:
         f"SL:    <b>{_fp(trade['sl'])}</b>  (-{trade['risk_pct']}%)\n"
         f"TP:    <b>{_fp(trade['tp'])}</b>  (+{trade['reward_pct']}%)\n"
         f"Размер: <b>${trade['size_usd']}</b>{rr}\n"
-        f"Баланс: ${balance:,.2f}"
+        f"Equity: ${balance:,.2f}"
     )
 
 
@@ -539,7 +539,7 @@ def fmt_trade_closed(trade: Dict, balance: float) -> str:
         f"━━━━━━━━━━━━━━\n"
         f"Вход: {_fp(trade['entry_price'])} → Закрыт: <b>{_fp(trade['close_price'])}</b>\n"
         f"P&L: <b>{sign}${trade['pnl_usd']}  ({sign}{trade['pnl_percent']}%)</b>\n"
-        f"Баланс: <b>${balance:,.2f}</b>"
+        f"Equity: <b>${balance:,.2f}</b>"
     )
 
 
@@ -569,7 +569,7 @@ def fmt_pending_triggered(trade: Dict, balance: float) -> str:
         f"━━━━━━━━━━━━━━\n"
         f"Цена коснулась уровня: <b>{_fp(trade['entry_price'])}</b>\n"
         f"SL: <b>{_fp(trade['sl'])}</b>  •  TP: <b>{_fp(trade['tp'])}</b>\n"
-        f"Баланс: ${balance:,.2f}"
+        f"Equity: ${balance:,.2f}"
     )
 
 
@@ -589,8 +589,8 @@ def fmt_stats(ptf: PaperPortfolio) -> str:
     ps   = "+" if s["total_pnl"] >= 0 else ""
     lines = [
         "📊 <b>СТАТИСТИКА ПОРТФЕЛЯ</b>", "",
-        f"💰 Баланс: <b>${s['balance']:,.2f}</b>  ({sign}{s['balance_change_pct']}%)",
-        f"🏦 Начальный: ${s['initial_balance']:,.2f}",
+        f"💰 Equity: <b>${s['equity']:,.2f}</b>  ({sign}{s['balance_change_pct']}%)",
+        f"🏦 Начальный: ${s['initial_balance']:,.2f}  •  Реализован: ${s['balance']:,.2f}",
         f"📂 Открытых: <b>{s['open_count']}</b>  •  ⏳ Ожидающих: <b>{s['pending_count']}</b>", "",
         f"📈 Всего закрыто: <b>{s['total_closed']}</b>",
         f"  ✅ Прибыльных: <b>{s['wins']}</b>  ({s['winrate']}% winrate)",
@@ -704,6 +704,7 @@ async def analyze_pair(
         return
 
     current_price = float(df["close"].iloc[-1])
+    portfolio.update_price(pair, current_price)
 
     if last_check is None:
         last_check = df.iloc[-2]
@@ -711,15 +712,15 @@ async def analyze_pair(
 
     # 1. Закрытие открытых сделок по SL/TP
     for trade in portfolio.check_sl_tp(pair, h, l):
-        await send_msg(bot, fmt_trade_closed(trade, portfolio.balance))
+        await send_msg(bot, fmt_trade_closed(trade, portfolio.get_equity()))
 
     # 2. Проверка ожидающих ордеров — коснулась ли цена уровня
     triggered, cancelled = portfolio.check_pending_orders(pair, h, l)
     for trade in triggered:
-        await send_msg(bot, fmt_pending_triggered(trade, portfolio.balance))
+        await send_msg(bot, fmt_pending_triggered(trade, portfolio.get_equity()))
         # Та же свеча могла пробить SL — проверяем сразу после открытия
         for closed in portfolio.check_sl_tp(pair, h, l):
-            await send_msg(bot, fmt_trade_closed(closed, portfolio.balance))
+            await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
 
     # 3. Уровни и сигналы
     levels  = find_support_resistance(df)
@@ -861,7 +862,7 @@ async def post_init(app: Application) -> None:
         f"🚀 <b>Signaler + Paper Trading запущен</b>\n"
         f"Пары: {pairs_mode}  •  TF: <code>{TIMEFRAME}</code>\n"
         f"Режим: <b>{mode}</b>\n\n"
-        f"💰 Баланс: <b>${portfolio.balance:,.2f}</b>  "
+        f"💰 Equity: <b>${portfolio.get_equity():,.2f}</b>  "
         f"(из ${portfolio.initial_balance:,.2f})\n"
         f"Маржа на сделку: {TRADE_SIZE_PERCENT}%  •  Плечо: <b>{LEVERAGE}×</b>  •  Max: {MAX_OPEN_TRADES}\n"
         f"SL: {SL_PERCENT}%  •  TP: {TP_PERCENT}%  •  R:R 1:{round(TP_PERCENT/SL_PERCENT,1)}\n"
