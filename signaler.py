@@ -642,15 +642,20 @@ def fmt_stats(ptf: PaperPortfolio) -> str:
     s    = ptf.get_stats()
     sign = "+" if s["balance_change_pct"] >= 0 else ""
     ps   = "+" if s["total_pnl"] >= 0 else ""
+    ap   = "+" if s["avg_pnl"] >= 0 else ""
     lines = [
         "📊 <b>СТАТИСТИКА ПОРТФЕЛЯ</b>", "",
         f"💰 Equity: <b>${s['equity']:,.2f}</b>  ({sign}{s['balance_change_pct']}%)",
         f"🏦 Начальный: ${s['initial_balance']:,.2f}  •  Реализован: ${s['balance']:,.2f}",
         f"📂 Открытых: <b>{s['open_count']}</b>  •  ⏳ Ожидающих: <b>{s['pending_count']}</b>", "",
+        f"📋 Ордеров создано: <b>{s['orders_created']}</b>  •  "
+        f"Срабатывало: <b>{s['orders_triggered']}</b>  •  "
+        f"Отменено: <b>{s['orders_cancelled']}</b>", "",
         f"📈 Всего закрыто: <b>{s['total_closed']}</b>",
         f"  ✅ Прибыльных: <b>{s['wins']}</b>  ({s['winrate']}% winrate)",
         f"  ❌ Убыточных:  <b>{s['losses']}</b>", "",
-        f"💵 Итоговый P&L: <b>{ps}${s['total_pnl']:,.2f}</b>",
+        f"💵 Итоговый P&L: <b>{ps}${s['total_pnl']:,.2f}</b>  •  "
+        f"Средняя сделка: <b>{ap}${s['avg_pnl']:,.2f}</b>",
     ]
     if s["best"]:
         b = s["best"]
@@ -661,24 +666,39 @@ def fmt_stats(ptf: PaperPortfolio) -> str:
     return "\n".join(lines)
 
 
-def fmt_log(ptf: PaperPortfolio, n: int = 10) -> str:
-    trades = ptf.recent_trades(n)
-    if not trades:
-        return "📋 <b>Лог сделок</b>\n\n<i>Закрытых сделок пока нет.</i>"
-    lines = [f"📋 <b>Последние {len(trades)} сделок:</b>", ""]
-    for i, t in enumerate(trades, 1):
-        pnl  = t["pnl_usd"] or 0
-        em   = "✅" if pnl > 0 else "❌"
-        sign = "+" if pnl >= 0 else ""
-        rsn  = "TP" if t["close_reason"] == "TP" else "SL"
-        lines.append(
-            f"{i}. {em} <b>{t['pair']}</b> {t['direction']} [{rsn}]  "
-            f"<b>{sign}${t['pnl_usd']}</b> ({sign}{t['pnl_percent']}%)"
-        )
-        lines.append(
-            f"   {_fp(t['entry_price'])} → {_fp(t['close_price'])}"
-            f"  •  {(t['closed_at'] or '')[:16]}"
-        )
+def fmt_log(ptf: PaperPortfolio, n: int = 20) -> str:
+    open_trades = ptf.open_trades
+    closed      = ptf.recent_trades(n)
+    if not open_trades and not closed:
+        return "📋 <b>Лог сделок</b>\n\n<i>Сделок пока нет.</i>"
+    lines = [f"📋 <b>Лог сделок</b>  (закрытых: {len(ptf.closed_trades)}, открытых: {len(open_trades)})", ""]
+
+    if open_trades:
+        lines.append("<b>— Открытые —</b>")
+        for t in open_trades:
+            de = "📈" if t["direction"] == "LONG" else "📉"
+            lines.append(
+                f"{de} <b>{t['pair']}</b> {t['direction']}  •  вход: {_fp(t['entry_price'])}"
+                f"  •  SL {_fp(t['sl'])}  TP {_fp(t['tp'])}"
+            )
+            lines.append(f"   открыта: {(t.get('opened_at') or '')[:16]}")
+        lines.append("")
+
+    if closed:
+        lines.append(f"<b>— Последние {len(closed)} закрытых —</b>")
+        for i, t in enumerate(closed, 1):
+            pnl  = t["pnl_usd"] or 0
+            em   = "✅" if pnl > 0 else "❌"
+            sign = "+" if pnl >= 0 else ""
+            rsn  = "TP" if t["close_reason"] == "TP" else "SL"
+            lines.append(
+                f"{i}. {em} <b>{t['pair']}</b> {t['direction']} [{rsn}]  "
+                f"<b>{sign}${t['pnl_usd']}</b> ({sign}{t['pnl_percent']}%)"
+            )
+            lines.append(
+                f"   {_fp(t['entry_price'])} → {_fp(t['close_price'])}"
+                f"  •  {(t['closed_at'] or '')[:16]}"
+            )
     return "\n".join(lines)
 
 
@@ -704,10 +724,13 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
             pnl_line = f"\n   PnL: <b>{sign}${upnl:.2f}  ({sign}{upnl_pct:.1f}%)</b>  •  Цена: {_fp(cur)}"
         else:
             pnl_line = ""
+        ep = t["entry_price"]
+        sl_pct = t.get("risk_pct") or (round(abs(ep - t["sl"]) / ep * 100, 2) if ep else "?")
+        tp_pct = t.get("reward_pct") or (round(abs(t["tp"] - ep) / ep * 100, 2) if ep else "?")
         lines.append(
             f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}\n"
-            f"   Вход: {_fp(t['entry_price'])}\n"
-            f"   SL: {_fp(t['sl'])}  (-{t['risk_pct']}%)  •  TP: {_fp(t['tp'])}  (+{t['reward_pct']}%)"
+            f"   Вход: {_fp(ep)}\n"
+            f"   SL: {_fp(t['sl'])}  (-{sl_pct}%)  •  TP: {_fp(t['tp'])}  (+{tp_pct}%)"
             f"{pnl_line}"
         )
 
@@ -715,10 +738,13 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
         lines += ["", "⏳ <b>Ожидающие ордера:</b>"]
         for o in pending:
             de = "📈" if o["direction"] == "LONG" else "📉"
+            ep = o["entry_price"]
+            sl_pct = o.get("risk_pct") or (round(abs(ep - o["sl"]) / ep * 100, 2) if ep else "?")
+            tp_pct = o.get("reward_pct") or (round(abs(o["tp"] - ep) / ep * 100, 2) if ep else "?")
             lines.append(
                 f"{de} <b>#{o['id']}</b> {o['pair']}  •  {o['direction']}\n"
-                f"   Лимит: {_fp(o['entry_price'])}  "
-                f"SL: {_fp(o['sl'])}  (-{o['risk_pct']}%)  •  TP: {_fp(o['tp'])}  (+{o['reward_pct']}%)"
+                f"   Лимит: {_fp(ep)}  "
+                f"SL: {_fp(o['sl'])}  (-{sl_pct}%)  •  TP: {_fp(o['tp'])}  (+{tp_pct}%)"
             )
 
     return "\n".join(lines)
@@ -746,15 +772,6 @@ async def analyze_pair(
 ) -> None:
     logger.info("Анализ: %s", pair)
 
-    # Короткий TF для проверки ордеров и SL/TP — берём обе свечи (завершённую и текущую)
-    df_check = fetch_ohlcv(client, pair, CHECK_TIMEFRAME, 2)
-    if df_check is not None and len(df_check) >= 2:
-        h = max(float(df_check["high"].iloc[-2]), float(df_check["high"].iloc[-1]))
-        l = min(float(df_check["low"].iloc[-2]),  float(df_check["low"].iloc[-1]))
-        check_hl: Optional[tuple] = (h, l)
-    else:
-        check_hl = None
-
     # Основной TF для анализа уровней и сигналов
     df = fetch_ohlcv(client, pair, TIMEFRAME, CANDLES_LIMIT)
     if df is None or df.empty:
@@ -767,11 +784,21 @@ async def analyze_pair(
         current_price = float(df["close"].iloc[-1])
     portfolio.update_price(pair, current_price)
 
-    if check_hl is None:
+    # Короткий TF для SL/TP — прямой вызов CCXT (без проверки min_candles из fetch_ohlcv)
+    try:
+        raw_check = client.fetch_ohlcv(pair, CHECK_TIMEFRAME, limit=5)
+        if raw_check and len(raw_check) >= 2:
+            h = max(r[2] for r in raw_check[-2:])  # high
+            l = min(r[3] for r in raw_check[-2:])  # low
+        else:
+            raise ValueError("мало свечей")
+    except Exception:
         h = max(float(df["high"].iloc[-2]), float(df["high"].iloc[-1]))
         l = min(float(df["low"].iloc[-2]),  float(df["low"].iloc[-1]))
-    else:
-        h, l = check_hl
+
+    # Всегда включаем текущую живую цену, чтобы SL/TP срабатывал без задержки
+    h = max(h, current_price)
+    l = min(l, current_price)
 
     # 1. Закрытие открытых сделок по SL/TP
     for trade in portfolio.check_sl_tp(pair, h, l):
