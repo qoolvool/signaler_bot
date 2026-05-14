@@ -78,8 +78,10 @@ REQUIRE_RETEST        = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
 ENTRY_PROXIMITY_PERCENT = float(os.getenv("ENTRY_PROXIMITY_PERCENT", "0.5"))
 EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
 AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "0"))
-SL_PERCENT              = float(os.getenv("SL_PERCENT", "1.5"))  # стоп-лосс от цены входа
-TP_PERCENT              = float(os.getenv("TP_PERCENT", "3.0"))  # тейк-профит от цены входа
+ATR_PERIOD              = int(os.getenv("ATR_PERIOD",   "14"))   # период ATR
+SL_ATR_MULT             = float(os.getenv("SL_ATR_MULT",   "1.5"))  # SL = entry ± ATR × mult
+TP_ATR_MIN_MULT         = float(os.getenv("TP_ATR_MIN_MULT", "2.0"))  # TP не ближе ATR × mult
+MIN_RR                  = float(os.getenv("MIN_RR",         "1.5"))  # пропустить если R:R < этого
 
 DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
 RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.05"))
@@ -335,6 +337,16 @@ def _calc_ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
+def _calc_atr(df: pd.DataFrame, period: int = 14) -> float:
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"]  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return float(tr.rolling(period).mean().iloc[-1])
+
+
 def _detect_candle_pattern(df: pd.DataFrame) -> Optional[str]:
     if len(df) < 3:
         return None
@@ -366,8 +378,10 @@ def find_entry_signals(
     current_price: float,
     proximity_percent: float = ENTRY_PROXIMITY_PERCENT,
     ema_period: int = EMA_PERIOD,
-    sl_percent: float = SL_PERCENT,
-    tp_percent: float = TP_PERCENT,
+    atr_period: int = ATR_PERIOD,
+    sl_atr_mult: float = SL_ATR_MULT,
+    tp_atr_min_mult: float = TP_ATR_MIN_MULT,
+    min_rr: float = MIN_RR,
 ) -> List[Dict]:
     if ema_period >= len(df):
         logger.warning("Недостаточно свечей для EMA%d (%d)", ema_period, len(df))
@@ -376,6 +390,8 @@ def find_entry_signals(
     ema_val   = float(_calc_ema(df["close"], ema_period).iloc[-1])
     ema_trend = "UP" if current_price > ema_val else "DOWN"
     pattern   = _detect_candle_pattern(df)
+    atr       = _calc_atr(df, atr_period)
+
     signals = []
     for lvl in levels:
         distance = abs(current_price - lvl["price"]) / lvl["price"]
@@ -387,24 +403,49 @@ def find_entry_signals(
             direction = "SHORT"
         else:
             continue
-        entry = lvl["price"]
+
+        entry    = lvl["price"]
+        sl_dist  = atr * sl_atr_mult
+        tp_min   = atr * tp_atr_min_mult
+
         if direction == "LONG":
-            sl = entry * (1 - sl_percent / 100)
-            tp = entry * (1 + tp_percent / 100)
+            sl = entry - sl_dist
+            # ближайшее сопротивление выше entry, минимум на tp_min выше
+            candidates = [
+                l for l in levels
+                if l["type"] == "RESISTANCE" and l["price"] >= entry + tp_min
+            ]
+            tp = min(candidates, key=lambda x: x["price"])["price"] if candidates else entry + tp_min
         else:
-            sl = entry * (1 + sl_percent / 100)
-            tp = entry * (1 - tp_percent / 100)
-        rr = round(tp_percent / sl_percent, 1)
+            sl = entry + sl_dist
+            # ближайшая поддержка ниже entry, минимум на tp_min ниже
+            candidates = [
+                l for l in levels
+                if l["type"] == "SUPPORT" and l["price"] <= entry - tp_min
+            ]
+            tp = max(candidates, key=lambda x: x["price"])["price"] if candidates else entry - tp_min
+
+        tp_dist    = abs(tp - entry)
+        rr         = round(tp_dist / sl_dist, 1) if sl_dist > 0 else None
+        if rr is None or rr < min_rr:
+            continue
+
+        risk_pct   = round(sl_dist / entry * 100, 2)
+        reward_pct = round(tp_dist / entry * 100, 2)
+
         signals.append({
-            "direction": direction,
-            "level": lvl,
-            "pattern": pattern,
-            "ema": ema_val,
-            "ema_trend": ema_trend,
+            "direction":        direction,
+            "level":            lvl,
+            "pattern":          pattern,
+            "ema":              ema_val,
+            "ema_trend":        ema_trend,
+            "atr":              round(atr, 8),
             "distance_percent": round(distance * 100, 2),
-            "sl": sl,
-            "tp": tp,
-            "rr": rr,
+            "sl":               sl,
+            "tp":               tp,
+            "rr":               rr,
+            "risk_pct":         risk_pct,
+            "reward_pct":       reward_pct,
         })
     return signals
 
@@ -485,12 +526,14 @@ def fmt_analysis(
                 f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}"
                 f"  <i>({sig['distance_percent']}%)</i>"
             )
-            lines.append(f"   Тренд: {ta} EMA{EMA_PERIOD} = {_fp(sig['ema'])}")
+            lines.append(f"   Тренд: {ta} EMA{EMA_PERIOD} = {_fp(sig['ema'])}  •  ATR = {_fp(sig['atr'])}")
             if sig["pattern"]:
                 lines.append(f"   Паттерн: {sig['pattern']}")
-            tp_str = _fp(sig["tp"]) if sig["tp"] else "—"
             rr_str = f"  •  R:R 1:{sig['rr']}" if sig["rr"] else ""
-            lines.append(f"   SL: <b>{_fp(sig['sl'])}</b>  •  TP: <b>{tp_str}</b>{rr_str}")
+            lines.append(
+                f"   SL: <b>{_fp(sig['sl'])}</b> (-{sig['risk_pct']}%)"
+                f"  •  TP: <b>{_fp(sig['tp'])}</b> (+{sig['reward_pct']}%){rr_str}"
+            )
         lines.append("")
     else:
         lines += ["⏳ <i>Сигналов нет — цена далеко от уровней.</i>", ""]
@@ -871,8 +914,8 @@ async def post_init(app: Application) -> None:
         f"💰 Equity: <b>${portfolio.get_equity():,.2f}</b>  "
         f"(из ${portfolio.initial_balance:,.2f})\n"
         f"Маржа на сделку: {TRADE_SIZE_PERCENT}%  •  Плечо: <b>{LEVERAGE}×</b>  •  Max: {MAX_OPEN_TRADES}\n"
-        f"SL: {SL_PERCENT}%  •  TP: {TP_PERCENT}%  •  R:R 1:{round(TP_PERCENT/SL_PERCENT,1)}\n"
-        f"EMA: {EMA_PERIOD}  •  Entry proximity: {ENTRY_PROXIMITY_PERCENT}%\n\n"
+        f"SL: ATR×{SL_ATR_MULT}  •  TP: ближ. уровень (мин ATR×{TP_ATR_MIN_MULT})  •  Min R:R 1:{MIN_RR}\n"
+        f"ATR period: {ATR_PERIOD}  •  EMA: {EMA_PERIOD}  •  Entry proximity: {ENTRY_PROXIMITY_PERCENT}%\n\n"
         f"Первый анализ через ~15 сек."
     )
     try:
