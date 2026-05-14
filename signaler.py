@@ -83,6 +83,19 @@ EXTREMA_WINDOW = int(os.getenv("EXTREMA_WINDOW", "8"))
 # Топ N самых сильных уровней / Top N strongest levels
 TOP_N_LEVELS = int(os.getenv("TOP_N_LEVELS", "5"))
 
+# Минимальный промежуток между касаниями (в свечах) / Min candles between consecutive touches
+MIN_TOUCH_SPACING = int(os.getenv("MIN_TOUCH_SPACING", "3"))
+
+# Минимальный возраст уровня (свечей от конца данных) / Min level age (candles from data end)
+LEVEL_AGE_MIN_CANDLES = int(os.getenv("LEVEL_AGE_MIN_CANDLES", "10"))
+
+# Множитель среднего объёма для засчитывания касания (0 = фильтр отключён) /
+# Avg-volume multiplier required at touch (0 = disabled)
+VOLUME_TOUCH_MULTIPLIER = float(os.getenv("VOLUME_TOUCH_MULTIPLIER", "1.2"))
+
+# Требовать ретест после пробоя / Require retest after breakout
+REQUIRE_RETEST = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
+
 # Задержка между анализом пар (сек) / Delay between pairs (sec)
 DELAY_BETWEEN_PAIRS = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
 
@@ -203,11 +216,12 @@ def _find_local_extrema(
     series: pd.Series,
     window: int,
     kind: str,
-) -> List[float]:
+) -> List[tuple]:
     """
     Найти локальные максимумы/минимумы в серии.
     Find local maxima/minima within a rolling window.
 
+    Returns list of (price, index) tuples.
     kind: 'max' -> локальные максимумы (сопротивление)
           'min' -> локальные минимумы (поддержка)
     """
@@ -217,28 +231,92 @@ def _find_local_extrema(
         segment = values[i - window:i + window + 1]
         center = values[i]
         if kind == "max" and center == segment.max():
-            extrema.append(float(center))
+            extrema.append((float(center), i))
         elif kind == "min" and center == segment.min():
-            extrema.append(float(center))
+            extrema.append((float(center), i))
     return extrema
 
 
 def _count_touches(
     level: float,
-    highs: np.ndarray,
-    lows: np.ndarray,
+    df: pd.DataFrame,
     tolerance: float,
+    min_spacing: int = 0,
+    volume_multiplier: float = 0.0,
 ) -> int:
     """
     Посчитать количество касаний цены к уровню.
     Count how many times price touched a level (within tolerance).
+
+    Критерии качества касания:
+    - min_spacing: минимальный промежуток между касаниями (в свечах)
+    - volume_multiplier: засчитывается только при объёме >= avg * multiplier
     """
     upper = level * (1 + tolerance)
     lower = level * (1 - tolerance)
-    # Касание = цена high или low оказалась внутри коридора уровня
-    touched_high = np.sum((highs <= upper) & (highs >= lower))
-    touched_low = np.sum((lows <= upper) & (lows >= lower))
-    return int(touched_high + touched_low)
+    avg_volume = df["volume"].mean()
+
+    touch_indices = []
+    for i in range(len(df)):
+        high = df["high"].iat[i]
+        low = df["low"].iat[i]
+        if not ((lower <= high <= upper) or (lower <= low <= upper)):
+            continue
+        if volume_multiplier > 0 and df["volume"].iat[i] < avg_volume * volume_multiplier:
+            continue
+        touch_indices.append(i)
+
+    if not touch_indices:
+        return 0
+
+    if min_spacing <= 0:
+        return len(touch_indices)
+
+    # Оставляем только касания, разделённые минимальным промежутком
+    filtered = [touch_indices[0]]
+    for idx in touch_indices[1:]:
+        if idx - filtered[-1] >= min_spacing:
+            filtered.append(idx)
+
+    return len(filtered)
+
+
+def _has_retest_after_breakout(
+    level: float,
+    df: pd.DataFrame,
+    tolerance: float,
+    level_type: str,
+) -> bool:
+    """
+    Проверить, был ли ретест уровня после его пробоя.
+    Check if there was a retest of the level after a breakout.
+
+    Пробой: свеча закрывается за пределами зоны уровня.
+    Ретест: после пробоя цена возвращается к зоне уровня.
+    """
+    upper = level * (1 + tolerance)
+    lower = level * (1 - tolerance)
+    closes = df["close"].values
+    highs = df["high"].values
+    lows = df["low"].values
+
+    in_breakout = False
+    for i in range(len(closes)):
+        if not in_breakout:
+            if level_type == "SUPPORT" and closes[i] < lower:
+                in_breakout = True
+            elif level_type == "RESISTANCE" and closes[i] > upper:
+                in_breakout = True
+        else:
+            if (lower <= highs[i] <= upper) or (lower <= lows[i] <= upper):
+                return True
+            # Ложный пробой — цена вернулась на исходную сторону
+            if level_type == "SUPPORT" and closes[i] > upper:
+                in_breakout = False
+            elif level_type == "RESISTANCE" and closes[i] < lower:
+                in_breakout = False
+
+    return False
 
 
 def remove_duplicates(
@@ -280,25 +358,26 @@ def find_support_resistance(
     tolerance_percent: float = TOLERANCE_PERCENT,
     window: int = EXTREMA_WINDOW,
     top_n: int = TOP_N_LEVELS,
+    min_touch_spacing: int = MIN_TOUCH_SPACING,
+    level_age_min: int = LEVEL_AGE_MIN_CANDLES,
+    volume_multiplier: float = VOLUME_TOUCH_MULTIPLIER,
+    require_retest: bool = REQUIRE_RETEST,
 ) -> List[Dict]:
     """
     Найти уровни поддержки и сопротивления.
     Find support and resistance levels.
 
     Алгоритм:
-    1. Находим локальные максимумы (потенциальные сопротивления)
-       и локальные минимумы (потенциальные поддержки).
-    2. Для каждого кандидата считаем количество касаний.
-    3. Отфильтровываем уровни с touches < MIN_TOUCHES.
-    4. Удаляем дубликаты (близкие уровни).
-    5. Возвращаем топ-N самых сильных.
+    1. Находим локальные максимумы/минимумы (кандидаты в уровни).
+    2. Фильтруем слишком молодые уровни (level_age_min).
+    3. Считаем касания с учётом промежутка во времени и объёма.
+    4. Отфильтровываем уровни с touches < min_touches.
+    5. Опционально: требуем ретест после пробоя (require_retest).
+    6. Удаляем дубликаты, берём топ-N.
     """
     tolerance = tolerance_percent / 100.0
+    total_candles = len(df)
 
-    highs = df["high"].values
-    lows = df["low"].values
-
-    # 1. Локальные экстремумы
     resistance_candidates = _find_local_extrema(df["high"], window, "max")
     support_candidates = _find_local_extrema(df["low"], window, "min")
 
@@ -310,33 +389,37 @@ def find_support_resistance(
 
     levels: List[Dict] = []
 
-    # 2. Считаем касания для каждого кандидата сопротивления
-    for price in resistance_candidates:
-        touches = _count_touches(price, highs, lows, tolerance)
-        if touches >= min_touches:
+    for candidates, level_type in [
+        (resistance_candidates, "RESISTANCE"),
+        (support_candidates, "SUPPORT"),
+    ]:
+        for price, idx in candidates:
+            # Критерий возраста: уровень должен быть сформирован достаточно давно
+            age = total_candles - 1 - idx
+            if age < level_age_min:
+                continue
+
+            touches = _count_touches(
+                price, df, tolerance,
+                min_spacing=min_touch_spacing,
+                volume_multiplier=volume_multiplier,
+            )
+            if touches < min_touches:
+                continue
+
+            has_retest = _has_retest_after_breakout(price, df, tolerance, level_type)
+            if require_retest and not has_retest:
+                continue
+
             levels.append({
                 "price": price,
-                "type": "RESISTANCE",
+                "type": level_type,
                 "touches": touches,
+                "has_retest": has_retest,
             })
 
-    # 2b. Считаем касания для кандидатов поддержки
-    for price in support_candidates:
-        touches = _count_touches(price, highs, lows, tolerance)
-        if touches >= min_touches:
-            levels.append({
-                "price": price,
-                "type": "SUPPORT",
-                "touches": touches,
-            })
-
-    # 3. Удаляем дубликаты
     levels = remove_duplicates(levels, tolerance)
-
-    # 4. Берём топ-N
     levels = sorted(levels, key=lambda x: x["touches"], reverse=True)[:top_n]
-
-    # 5. Сортируем для красивого вывода: по цене (по убыванию)
     levels = sorted(levels, key=lambda x: x["price"], reverse=True)
 
     logger.info("Найдено уровней: %d", len(levels))
@@ -409,11 +492,13 @@ def format_message(
         ru_type = "Сопротивление" if lvl["type"] == "RESISTANCE" else "Поддержка"
         distance = (lvl["price"] - current_price) / current_price * 100
         sign = "+" if distance >= 0 else ""
+        retest_mark = " ✅ретест" if lvl.get("has_retest") else ""
         lines.append(
             f"{emoji} <b>{_format_price(lvl['price'])}</b> "
             f"— {ru_type} "
             f"(касаний: <b>{lvl['touches']}</b>, "
-            f"расстояние: <b>{sign}{distance:.2f}%</b>)"
+            f"расстояние: <b>{sign}{distance:.2f}%</b>"
+            f"{retest_mark})"
         )
 
     return "\n".join(lines)
@@ -520,7 +605,9 @@ async def run() -> None:
         f"🚀 <b>Signaler запущен</b>\n"
         f"Пар: {len(TRADING_PAIRS)}  •  TF: <code>{TIMEFRAME}</code>\n"
         f"Режим: <b>{mode}</b>\n"
-        f"Min touches: {MIN_TOUCHES}  •  Tolerance: {TOLERANCE_PERCENT}%"
+        f"Min touches: {MIN_TOUCHES}  •  Tolerance: {TOLERANCE_PERCENT}%\n"
+        f"Touch spacing: {MIN_TOUCH_SPACING}св  •  Level age: {LEVEL_AGE_MIN_CANDLES}св\n"
+        f"Volume ×{VOLUME_TOUCH_MULTIPLIER}  •  Retest: {'вкл' if REQUIRE_RETEST else 'выкл'}"
     )
     await send_telegram_message(bot, start_msg)
 
