@@ -70,7 +70,7 @@ TRADING_PAIRS = [
 
 TIMEFRAME             = os.getenv("TIMEFRAME", "30m")
 CHECK_TIMEFRAME       = os.getenv("CHECK_TIMEFRAME", "5m")   # для проверки ордеров и SL/TP
-CANDLES_LIMIT         = int(os.getenv("CANDLES_LIMIT", "250"))
+CANDLES_LIMIT         = int(os.getenv("CANDLES_LIMIT", "500"))
 MIN_TOUCHES           = int(os.getenv("MIN_TOUCHES", "3"))
 TOLERANCE_PERCENT     = float(os.getenv("TOLERANCE_PERCENT", "0.8"))
 EXTREMA_WINDOW        = int(os.getenv("EXTREMA_WINDOW", "8"))
@@ -900,18 +900,16 @@ def fmt_log(ptf: PaperPortfolio, n: int = 20) -> str:
 
 
 def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
-    open_t   = ptf.open_trades
-    pending  = ptf.pending_orders
-    if not open_t and not pending:
-        return "📂 <b>Активных позиций нет</b>\n\n<i>Жду сигналов...</i>"
+    open_t = ptf.open_trades
+    if not open_t:
+        return "📂 <b>Открытых позиций нет</b>\n\n<i>Для просмотра ожидающих ордеров нажми ⏳ Ордера.</i>"
 
-    lines = ["📂 <b>ТЕКУЩИЕ ПОЗИЦИИ</b>", ""]
+    lines = [f"📂 <b>ОТКРЫТЫЕ ПОЗИЦИИ</b>  ({len(open_t)} шт.)", ""]
 
     for t in open_t:
         de  = "📈" if t["direction"] == "LONG" else "📉"
         cur = prices.get(t["pair"])
         if cur:
-            lev  = t.get("leverage", 1)
             ntl  = t.get("notional", t["size_usd"])
             upnl = ((cur - t["entry_price"]) / t["entry_price"] * ntl
                     if t["direction"] == "LONG"
@@ -930,19 +928,6 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
             f"   SL: {_fp(t['sl'])}  (-{sl_pct}%)  •  TP: {_fp(t['tp'])}  (+{tp_pct}%)"
             f"{pnl_line}"
         )
-
-    if pending:
-        lines += ["", "⏳ <b>Ожидающие ордера:</b>"]
-        for o in pending:
-            de = "📈" if o["direction"] == "LONG" else "📉"
-            ep = o["entry_price"]
-            sl_pct = o.get("risk_pct") or (round(abs(ep - o["sl"]) / ep * 100, 2) if ep else "?")
-            tp_pct = o.get("reward_pct") or (round(abs(o["tp"] - ep) / ep * 100, 2) if ep else "?")
-            lines.append(
-                f"{de} <b>#{o['id']}</b> {o['pair']}  •  {o['direction']}\n"
-                f"   Лимит: {_fp(ep)}  "
-                f"SL: {_fp(o['sl'])}  (-{sl_pct}%)  •  TP: {_fp(o['tp'])}  (+{tp_pct}%)"
-            )
 
     return "\n".join(lines)
 
