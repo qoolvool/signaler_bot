@@ -849,9 +849,7 @@ async def analyze_pair(
         await send_msg(bot, fmt_trade_closed(trade, portfolio.get_equity()))
 
     # 2. Проверка ожидающих ордеров — коснулась ли цена уровня
-    triggered, cancelled = portfolio.check_pending_orders(pair, h, l)
-    for trade in triggered:
-        await send_msg(bot, fmt_trade_opened(trade, portfolio.get_equity()))
+    triggered, _ = portfolio.check_pending_orders(pair, h, l)
     # Та же свеча могла сразу пробить SL/TP у только что открытых сделок
     for closed in portfolio.check_sl_tp(pair, h, l):
         await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
