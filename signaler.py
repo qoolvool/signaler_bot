@@ -18,8 +18,15 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
+
+# load_dotenv MUST come before paper_trader import so DATA_DIR is applied to file paths
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 import ccxt
 import pandas as pd
@@ -36,12 +43,6 @@ from telegram.ext import (
 )
 
 from paper_trader import PaperPortfolio
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 
 # ============================================================
@@ -890,10 +891,10 @@ def fmt_stats(ptf: PaperPortfolio) -> str:
     ]
     if s["best"]:
         b = s["best"]
-        lines.append(f"🏆 Лучшая:  <b>+${b['pnl_usd']}</b>  ({b['pair']} {b['direction']})")
+        lines.append(f"🏆 Лучшая:  <b>+${b['pnl_usd'] or 0}</b>  ({b['pair']} {b['direction']})")
     if s["worst"]:
         w = s["worst"]
-        lines.append(f"💔 Худшая:  <b>${w['pnl_usd']}</b>  ({w['pair']} {w['direction']})")
+        lines.append(f"💔 Худшая:  <b>${w['pnl_usd'] or 0}</b>  ({w['pair']} {w['direction']})")
     lines.append(f"\n<i>v{BOT_VERSION}</i>")
     return "\n".join(lines)
 
@@ -912,7 +913,7 @@ def fmt_log(ptf: PaperPortfolio, n: int = 20) -> str:
         rsn  = "TP" if t["close_reason"] == "TP" else "SL"
         lines.append(
             f"{i}. {em} <b>{t['pair']}</b> {t['direction']} [{rsn}]  "
-            f"<b>{sign}${t['pnl_usd']}</b> ({sign}{t['pnl_percent']}%)"
+            f"<b>{sign}${t['pnl_usd'] or 0}</b> ({sign}{t['pnl_percent'] or 0}%)"
         )
         lines.append(
             f"   {_fp(t['entry_price'])} → {_fp(t['close_price'])}"
@@ -942,10 +943,12 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
         else:
             pnl_line = ""
         ep = t["entry_price"]
-        sl_pct = t.get("risk_pct") or (round(abs(ep - t["sl"]) / ep * 100, 2) if ep else "?")
-        tp_pct = t.get("reward_pct") or (round(abs(t["tp"] - ep) / ep * 100, 2) if ep else "?")
+        # Всегда пересчитываем от текущего SL — важно после переноса в безубыток
+        sl_pct = round(abs(ep - t["sl"]) / ep * 100, 2) if ep else "?"
+        tp_pct = round(abs(t["tp"] - ep) / ep * 100, 2) if ep else "?"
+        be_mark = " 🔒" if t.get("sl_at_breakeven") else ""
         lines.append(
-            f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}\n"
+            f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}{be_mark}\n"
             f"   Вход: {_fp(ep)}\n"
             f"   SL: {_fp(t['sl'])}  (-{sl_pct}%)  •  TP: {_fp(t['tp'])}  (+{tp_pct}%)"
             f"{pnl_line}"
@@ -1043,11 +1046,12 @@ async def analyze_pair(
 
     # HTF тренд (4h) + ADX на рабочем TF
     htf_trend, htf_ema = _calc_htf_trend(client, pair)
-    adx_val, plus_di, minus_di = _calc_adx(df, ADX_PERIOD)
+    adx_val, _, _ = _calc_adx(df, ADX_PERIOD)
 
     # RSI + ATR-ratio → режим рынка
     rsi_series = _calc_rsi_series(df, RSI_PERIOD)
-    rsi_val    = float(rsi_series.iloc[-1])
+    rsi_raw    = float(rsi_series.iloc[-1])
+    rsi_val    = rsi_raw if not pd.isna(rsi_raw) else 50.0  # NaN → нейтральное значение
     atr_ratio  = _calc_atr_ratio(df, ATR_PERIOD)
     regime     = _detect_regime(rsi_series, atr_ratio)
     crash_low  = _find_crash_low(df, CRASH_LOW_LOOKBACK)  if regime == "RECOVERY"   else None
