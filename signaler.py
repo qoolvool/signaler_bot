@@ -96,15 +96,23 @@ HTF_EMA_PERIOD = int(os.getenv("HTF_EMA_PERIOD", "50"))   # EMA на HTF
 ADX_PERIOD     = int(os.getenv("ADX_PERIOD", "14"))    # период ADX
 ADX_MIN        = float(os.getenv("ADX_MIN",  "20"))    # ниже = боковик, не торговать
 
-# --- Краш-детектор и режим восстановления ---
+# --- Краш-детектор и режим восстановления / Памп-детектор и режим коррекции ---
 RSI_PERIOD            = int(os.getenv("RSI_PERIOD",            "14"))
-RSI_OVERSOLD          = float(os.getenv("RSI_OVERSOLD",        "30"))   # ниже = паника
-RSI_RECOVERY_MAX      = float(os.getenv("RSI_RECOVERY_MAX",    "45"))   # выше = восстановление завершено
-RSI_OVERSOLD_LOOKBACK = int(os.getenv("RSI_OVERSOLD_LOOKBACK", "10"))   # свечей назад для проверки
-CRASH_PAUSE_ATR_RATIO = float(os.getenv("CRASH_PAUSE_ATR_RATIO", "2.5"))  # ATR/avg_ATR → пауза
-CRASH_RESUME_ATR_RATIO= float(os.getenv("CRASH_RESUME_ATR_RATIO","2.0"))  # ниже → ищем отскок
-CRASH_LOW_LOOKBACK    = int(os.getenv("CRASH_LOW_LOOKBACK",    "20"))   # свечей для поиска лоя краша
-CRASH_SL_BUFFER       = float(os.getenv("CRASH_SL_BUFFER",    "0.3"))   # % ниже лоя краша для SL
+# Падение
+RSI_OVERSOLD          = float(os.getenv("RSI_OVERSOLD",        "30"))   # ниже = паника продаж
+RSI_RECOVERY_MAX      = float(os.getenv("RSI_RECOVERY_MAX",    "47"))   # выше = отскок завершён
+RSI_OVERSOLD_LOOKBACK = int(os.getenv("RSI_OVERSOLD_LOOKBACK", "12"))   # свечей назад
+CRASH_LOW_LOOKBACK    = int(os.getenv("CRASH_LOW_LOOKBACK",    "24"))   # свечей для поиска лоя
+CRASH_SL_BUFFER       = float(os.getenv("CRASH_SL_BUFFER",    "0.35"))  # % ниже лоя краша для SL
+# Рост
+RSI_OVERBOUGHT        = float(os.getenv("RSI_OVERBOUGHT",      "70"))   # выше = памп
+RSI_CORRECTION_MIN    = float(os.getenv("RSI_CORRECTION_MIN",  "55"))   # ниже = коррекция завершена
+RSI_OVERBOUGHT_LOOKBACK = int(os.getenv("RSI_OVERBOUGHT_LOOKBACK","12"))
+PUMP_HIGH_LOOKBACK    = int(os.getenv("PUMP_HIGH_LOOKBACK",    "24"))   # свечей для поиска хая
+PUMP_SL_BUFFER        = float(os.getenv("PUMP_SL_BUFFER",     "0.35"))  # % выше хая памп для SL
+# Общий ATR-ratio порог (один для обоих направлений)
+CRASH_PAUSE_ATR_RATIO = float(os.getenv("CRASH_PAUSE_ATR_RATIO", "2.5"))
+CRASH_RESUME_ATR_RATIO= float(os.getenv("CRASH_RESUME_ATR_RATIO","2.0"))
 
 DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
 RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.05"))
@@ -420,20 +428,29 @@ def _calc_atr_ratio(df: pd.DataFrame, atr_period: int = 14, avg_period: int = 20
 
 
 def _detect_regime(rsi_series: pd.Series, atr_ratio: float) -> str:
-    """Возвращает 'CRASH', 'RECOVERY' или 'NORMAL'."""
+    """Возвращает 'CRASH'/'RECOVERY'/'PUMP'/'CORRECTION'/'NORMAL'."""
+    curr_rsi = float(rsi_series.iloc[-1])
     if atr_ratio >= CRASH_PAUSE_ATR_RATIO:
-        return "CRASH"
+        # Отличаем направление паники по RSI
+        return "CRASH" if curr_rsi < 50 else "PUMP"
     if atr_ratio < CRASH_RESUME_ATR_RATIO:
-        recent      = rsi_series.iloc[-RSI_OVERSOLD_LOOKBACK:]
-        was_panic   = bool((recent < RSI_OVERSOLD).any())
-        curr_rsi    = float(rsi_series.iloc[-1])
-        if was_panic and curr_rsi < RSI_RECOVERY_MAX:
+        lookback_n = max(RSI_OVERSOLD_LOOKBACK, RSI_OVERBOUGHT_LOOKBACK)
+        recent = rsi_series.iloc[-lookback_n:]
+        if bool((recent.iloc[-RSI_OVERSOLD_LOOKBACK:] < RSI_OVERSOLD).any()) \
+                and curr_rsi < RSI_RECOVERY_MAX:
             return "RECOVERY"
+        if bool((recent.iloc[-RSI_OVERBOUGHT_LOOKBACK:] > RSI_OVERBOUGHT).any()) \
+                and curr_rsi > RSI_CORRECTION_MIN:
+            return "CORRECTION"
     return "NORMAL"
 
 
 def _find_crash_low(df: pd.DataFrame, lookback: int = 20) -> float:
     return float(df["low"].iloc[-lookback:].min())
+
+
+def _find_pump_high(df: pd.DataFrame, lookback: int = 20) -> float:
+    return float(df["high"].iloc[-lookback:].max())
 
 
 def _calc_htf_trend(client, pair: str):
@@ -492,24 +509,27 @@ def find_entry_signals(
     adx_min: float = ADX_MIN,
     regime: str = "NORMAL",
     crash_low: Optional[float] = None,
+    pump_high: Optional[float] = None,
 ) -> List[Dict]:
-    # В режиме краша — не создавать новых ордеров
-    if regime == "CRASH":
+    # Во время паники (краш или памп) — не создавать новых ордеров
+    if regime in ("CRASH", "PUMP"):
         return []
 
     if ema_period >= len(df):
         logger.warning("Недостаточно свечей для EMA%d (%d)", ema_period, len(df))
         return []
 
-    proximity  = proximity_percent / 100.0
-    ema_val    = float(_calc_ema(df["close"], ema_period).iloc[-1])
-    ema_trend  = "UP" if current_price > ema_val else "DOWN"
-    pattern    = _detect_candle_pattern(df)
-    atr        = _calc_atr(df, atr_period)
-    recovery   = (regime == "RECOVERY")
+    proximity   = proximity_percent / 100.0
+    ema_val     = float(_calc_ema(df["close"], ema_period).iloc[-1])
+    ema_trend   = "UP" if current_price > ema_val else "DOWN"
+    pattern     = _detect_candle_pattern(df)
+    atr         = _calc_atr(df, atr_period)
+    recovery    = (regime == "RECOVERY")
+    correction  = (regime == "CORRECTION")
+    special     = recovery or correction  # оба режима отключают стандартные фильтры
 
-    # ADX фильтр пропускаем в режиме восстановления (рынок только вышел из паники)
-    if not recovery and adx_val is not None and adx_min > 0 and adx_val < adx_min:
+    # ADX фильтр пропускаем в спецрежимах — рынок только вышел из аномального движения
+    if not special and adx_val is not None and adx_min > 0 and adx_val < adx_min:
         logger.info("ADX %.1f < %.1f — боковик, сигналы пропущены", adx_val, adx_min)
         return []
 
@@ -520,10 +540,13 @@ def find_entry_signals(
             continue
 
         if recovery:
-            # В режиме восстановления: только LONG от поддержки, EMA/HTF фильтры отключены
             if lvl["type"] != "SUPPORT":
                 continue
             direction = "LONG"
+        elif correction:
+            if lvl["type"] != "RESISTANCE":
+                continue
+            direction = "SHORT"
         else:
             if lvl["type"] == "SUPPORT" and ema_trend == "UP":
                 direction = "LONG"
@@ -531,7 +554,6 @@ def find_entry_signals(
                 direction = "SHORT"
             else:
                 continue
-            # HTF фильтр активен только в обычном режиме
             if htf_trend is not None:
                 if htf_trend != ("UP" if direction == "LONG" else "DOWN"):
                     continue
@@ -539,17 +561,27 @@ def find_entry_signals(
         entry = lvl["price"]
 
         if recovery and crash_low is not None:
-            # SL = лой краша минус буфер; TP рассчитывается от R:R, не от ATR
             sl      = crash_low * (1.0 - CRASH_SL_BUFFER / 100.0)
             sl_dist = entry - sl
             if sl_dist <= 0:
                 continue
-            tp_min  = sl_dist * min_rr
-            above   = sorted(
+            tp_min = sl_dist * min_rr
+            above  = sorted(
                 [l for l in levels if l["type"] == "RESISTANCE" and l["price"] > entry],
                 key=lambda x: x["price"],
             )
             tp = above[0]["price"] if above and above[0]["price"] >= entry + tp_min else entry + tp_min
+        elif correction and pump_high is not None:
+            sl      = pump_high * (1.0 + PUMP_SL_BUFFER / 100.0)
+            sl_dist = sl - entry
+            if sl_dist <= 0:
+                continue
+            tp_min = sl_dist * min_rr
+            below  = sorted(
+                [l for l in levels if l["type"] == "SUPPORT" and l["price"] < entry],
+                key=lambda x: x["price"], reverse=True,
+            )
+            tp = below[0]["price"] if below and below[0]["price"] <= entry - tp_min else entry - tp_min
         else:
             sl_dist = atr * sl_atr_mult
             tp_min  = atr * tp_atr_min_mult
@@ -703,7 +735,13 @@ def fmt_analysis(
     ratio_str = ""
     if atr_ratio is not None:
         ratio_str = f"ATR×: <b>{atr_ratio:.1f}</b>"
-    regime_map = {"CRASH": "⚠️ КРАШ — пауза", "RECOVERY": "🔄 ВОССТАНОВЛЕНИЕ", "NORMAL": ""}
+    regime_map = {
+        "CRASH":      "⚠️ КРАШ — пауза",
+        "RECOVERY":   "🔄 ВОССТАНОВЛЕНИЕ",
+        "PUMP":       "🚀 ПАМП — пауза",
+        "CORRECTION": "📉 КОРРЕКЦИЯ",
+        "NORMAL":     "",
+    }
     regime_str = regime_map.get(regime, "")
     extra = "  •  ".join(filter(None, [rsi_str, ratio_str, regime_str]))
     if extra:
@@ -981,7 +1019,8 @@ async def analyze_pair(
     rsi_val    = float(rsi_series.iloc[-1])
     atr_ratio  = _calc_atr_ratio(df, ATR_PERIOD)
     regime     = _detect_regime(rsi_series, atr_ratio)
-    crash_low  = _find_crash_low(df, CRASH_LOW_LOOKBACK) if regime == "RECOVERY" else None
+    crash_low  = _find_crash_low(df, CRASH_LOW_LOOKBACK)  if regime == "RECOVERY"   else None
+    pump_high  = _find_pump_high(df, PUMP_HIGH_LOOKBACK)  if regime == "CORRECTION" else None
 
     logger.info(
         "%s | HTF(%s)=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
@@ -996,6 +1035,7 @@ async def analyze_pair(
         adx_val=adx_val,
         regime=regime,
         crash_low=crash_low,
+        pump_high=pump_high,
     )
 
     # 4. Сохраняем отчёт в БД (без авто-отправки — доступен по кнопке монеты)
