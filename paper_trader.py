@@ -167,7 +167,20 @@ class PaperPortfolio:
                 self.pending_orders   = json.loads(raw)
 
             trade_rows = self._ws_trades.get_all_records()
-            self.trades = []
+            # If trades sheet is empty but a JSON backup exists, recover from it
+            if not trade_rows and TRADES_FILE.exists():
+                try:
+                    self.trades = json.loads(TRADES_FILE.read_text(encoding="utf-8"))
+                    logger.warning(
+                        "Trades sheet пуст — восстановлено %d сделок из JSON-резерва.",
+                        len(self.trades),
+                    )
+                    self._trades_dirty = True  # schedule rewrite to GSheets
+                    trade_rows = []  # skip the parsing loop below
+                except Exception as exc:
+                    logger.error("Ошибка чтения резервного trades.json: %s", exc)
+                    trade_rows = []
+            self.trades = [] if trade_rows else self.trades
             for r in trade_rows:
                 t = {k: (None if v == "" else v) for k, v in r.items()}
                 for f in ("entry_price", "sl", "tp", "size_usd", "notional",
@@ -202,13 +215,24 @@ class PaperPortfolio:
                 json.dumps(self.pending_orders, ensure_ascii=False),
                 _utcnow(),
             ]])
-            # Trades: full rewrite only when something changed — 2 API calls
+            # Trades: full rewrite only when something changed
             if self._trades_dirty:
+                # JSON backup first — protects data if GSheets write is interrupted
+                try:
+                    TRADES_FILE.write_text(
+                        json.dumps(self.trades, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
                 rows = [_TRADE_HEADERS] + [
                     [_cell(t.get(h)) for h in _TRADE_HEADERS] for t in self.trades
                 ]
-                self._ws_trades.clear()
+                n = len(rows)
+                # Write data first (no empty-sheet window), then trim stale trailing rows
                 self._ws_trades.update("A1", rows)
+                if self._ws_trades.row_count > n:
+                    self._ws_trades.resize(rows=n)
                 self._trades_dirty = False
         except Exception as exc:
             logger.error("Ошибка сохранения в Google Sheets: %s", exc)
@@ -314,6 +338,9 @@ class PaperPortfolio:
         sl: float,
         tp: float,
     ) -> Optional[Dict]:
+        if self.balance <= 0:
+            logger.warning("Баланс <= 0 ($%.2f) — создание ордеров остановлено.", self.balance)
+            return None
         if self.has_pending_order(pair, direction):
             logger.info("Ордер %s %s уже ожидает.", direction, pair)
             return None
@@ -400,7 +427,7 @@ class PaperPortfolio:
                 remaining.append(order)
 
         self.pending_orders = remaining
-        if triggered or cancelled or pair_had_orders:
+        if triggered or cancelled:
             self._save()
         return triggered, cancelled
 

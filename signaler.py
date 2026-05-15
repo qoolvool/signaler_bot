@@ -438,7 +438,7 @@ def _detect_regime(rsi_series: pd.Series, atr_ratio: float) -> str:
         was_pump   = bool((rsi_series.iloc[-RSI_OVERBOUGHT_LOOKBACK:] > RSI_OVERBOUGHT).any())
         # БАГ 2 fix: CORRECTION активна пока RSI > RSI_CORRECTION_MIN (55),
         # т.е. цена ещё высоко — коррекция только началась. Аналог RECOVERY: RSI < RSI_RECOVERY_MAX.
-        if was_panic and curr_rsi < RSI_RECOVERY_MAX:
+        if was_panic and RSI_OVERSOLD < curr_rsi < RSI_RECOVERY_MAX:
             return "RECOVERY"
         if was_pump and curr_rsi > RSI_CORRECTION_MIN:
             return "CORRECTION"
