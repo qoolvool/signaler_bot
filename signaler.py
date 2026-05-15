@@ -85,6 +85,12 @@ SL_ATR_MULT             = float(os.getenv("SL_ATR_MULT",   "1.5"))  # SL = entry
 TP_ATR_MIN_MULT         = float(os.getenv("TP_ATR_MIN_MULT", "2.5"))  # TP не ближе ATR × mult
 MIN_RR                  = float(os.getenv("MIN_RR",         "1.5"))  # пропустить если R:R < этого
 
+# --- Многотаймфреймовый тренд (HTF) + ADX ---
+HTF_TIMEFRAME  = os.getenv("HTF_TIMEFRAME",  "4h")   # старший TF для определения тренда
+HTF_EMA_PERIOD = int(os.getenv("HTF_EMA_PERIOD", "50"))   # EMA на HTF
+ADX_PERIOD     = int(os.getenv("ADX_PERIOD", "14"))    # период ADX
+ADX_MIN        = float(os.getenv("ADX_MIN",  "20"))    # ниже = боковик, не торговать
+
 DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
 RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.05"))
 
@@ -349,6 +355,46 @@ def _calc_atr(df: pd.DataFrame, period: int = 14) -> float:
     return float(tr.rolling(period).mean().iloc[-1])
 
 
+def _calc_adx(df: pd.DataFrame, period: int = 14):
+    """Wilder's ADX. Возвращает (adx, +DI, -DI). При нехватке данных — (0, 0, 0)."""
+    if len(df) < period * 2:
+        return 0.0, 0.0, 0.0
+    high  = df["high"].astype(float)
+    low   = df["low"].astype(float)
+    close = df["close"].astype(float)
+    ph, pl, pc = high.shift(1), low.shift(1), close.shift(1)
+    tr  = pd.concat([high - low, (high - pc).abs(), (low - pc).abs()], axis=1).max(axis=1)
+    up, dn = high - ph, pl - low
+    pdm = ((up > dn) & (up > 0)).astype(float) * up
+    ndm = ((dn > up) & (dn > 0)).astype(float) * dn
+    alpha = 1.0 / period
+    atr_s = tr.ewm(alpha=alpha, adjust=False).mean()
+    pdm_s = pdm.ewm(alpha=alpha, adjust=False).mean()
+    ndm_s = ndm.ewm(alpha=alpha, adjust=False).mean()
+    pdi   = 100.0 * pdm_s / atr_s.replace(0, float("nan"))
+    ndi   = 100.0 * ndm_s / atr_s.replace(0, float("nan"))
+    denom = (pdi + ndi).replace(0, float("nan"))
+    dx    = 100.0 * (pdi - ndi).abs() / denom
+    adx   = dx.ewm(alpha=alpha, adjust=False).mean()
+    return float(adx.iloc[-1]), float(pdi.iloc[-1]), float(ndi.iloc[-1])
+
+
+def _calc_htf_trend(client, pair: str):
+    """Фетчит HTF-свечи, возвращает ('UP'/'DOWN'/None, ema_val/None)."""
+    try:
+        needed = HTF_EMA_PERIOD + 30
+        raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=needed)
+        if not raw or len(raw) < HTF_EMA_PERIOD:
+            return None, None
+        closes = pd.Series([float(r[4]) for r in raw])
+        ema    = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
+        trend  = "UP" if float(raw[-1][4]) > ema else "DOWN"
+        return trend, round(ema, 8)
+    except Exception as exc:
+        logger.warning("Ошибка HTF тренда %s: %s", pair, exc)
+        return None, None
+
+
 def _detect_candle_pattern(df: pd.DataFrame) -> Optional[str]:
     if len(df) < 3:
         return None
@@ -378,12 +424,15 @@ def find_entry_signals(
     df: pd.DataFrame,
     levels: List[Dict],
     current_price: float,
+    htf_trend: Optional[str] = None,
+    adx_val: Optional[float] = None,
     proximity_percent: float = ENTRY_PROXIMITY_PERCENT,
     ema_period: int = EMA_PERIOD,
     atr_period: int = ATR_PERIOD,
     sl_atr_mult: float = SL_ATR_MULT,
     tp_atr_min_mult: float = TP_ATR_MIN_MULT,
     min_rr: float = MIN_RR,
+    adx_min: float = ADX_MIN,
 ) -> List[Dict]:
     if ema_period >= len(df):
         logger.warning("Недостаточно свечей для EMA%d (%d)", ema_period, len(df))
@@ -393,6 +442,11 @@ def find_entry_signals(
     ema_trend = "UP" if current_price > ema_val else "DOWN"
     pattern   = _detect_candle_pattern(df)
     atr       = _calc_atr(df, atr_period)
+
+    # ADX фильтр: боковик — не торговать
+    if adx_val is not None and adx_min > 0 and adx_val < adx_min:
+        logger.info("ADX %.1f < %.1f — боковик, сигналы пропущены", adx_val, adx_min)
+        return []
 
     signals = []
     for lvl in levels:
@@ -405,6 +459,12 @@ def find_entry_signals(
             direction = "SHORT"
         else:
             continue
+
+        # HTF фильтр: LONG только при 4h UP, SHORT только при 4h DOWN
+        if htf_trend is not None:
+            required = "UP" if direction == "LONG" else "DOWN"
+            if htf_trend != required:
+                continue
 
         entry    = lvl["price"]
         sl_dist  = atr * sl_atr_mult
@@ -451,6 +511,8 @@ def find_entry_signals(
             "pattern":          pattern,
             "ema":              ema_val,
             "ema_trend":        ema_trend,
+            "htf_trend":        htf_trend,
+            "adx":              round(adx_val, 1) if adx_val is not None else None,
             "atr":              round(atr, 8),
             "distance_percent": round(distance * 100, 2),
             "sl":               sl,
@@ -521,24 +583,50 @@ def fmt_analysis(
     current_price: float,
     levels: List[Dict],
     signals: List[Dict],
+    htf_trend: Optional[str] = None,
+    htf_ema: Optional[float] = None,
+    adx: Optional[float] = None,
 ) -> str:
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     lines = [
         f"📊 <b>{pair}</b>  •  <code>{timeframe}</code>",
         f"💰 Цена: <b>{_fp(current_price)}</b>",
-        f"🕒 {now}", "",
+        f"🕒 {now}",
     ]
+    # Шапка: HTF тренд + ADX
+    htf_str = ""
+    if htf_trend:
+        ht = "↑ UP" if htf_trend == "UP" else "↓ DOWN"
+        htf_str = f"  •  {HTF_TIMEFRAME} EMA{HTF_EMA_PERIOD}: <b>{ht}</b>"
+        if htf_ema:
+            htf_str += f" ({_fp(htf_ema)})"
+    adx_str = ""
+    if adx is not None:
+        label = "тренд" if adx >= ADX_MIN else "боковик"
+        adx_str = f"  •  ADX: <b>{adx:.1f}</b> ({label})"
+    if htf_str or adx_str:
+        lines.append(f"📡{htf_str}{adx_str}")
+    lines.append("")
+
     if signals:
         lines.append("🎯 <b>СИГНАЛЫ ВХОДА:</b>")
         for sig in signals:
-            lvl = sig["level"]
-            de  = "📈" if sig["direction"] == "LONG" else "📉"
-            ta  = "↑" if sig["ema_trend"] == "UP" else "↓"
+            lvl    = sig["level"]
+            de     = "📈" if sig["direction"] == "LONG" else "📉"
+            ta_30  = "↑" if sig["ema_trend"] == "UP" else "↓"
+            ta_htf = ""
+            if sig.get("htf_trend"):
+                ta_htf = "↑" if sig["htf_trend"] == "UP" else "↓"
+                ta_htf = f"  •  {HTF_TIMEFRAME}:{ta_htf}"
+            adx_s = f"  •  ADX:{sig['adx']}" if sig.get("adx") is not None else ""
             lines.append(
                 f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}"
                 f"  <i>({sig['distance_percent']}%)</i>"
             )
-            lines.append(f"   Тренд: {ta} EMA{EMA_PERIOD} = {_fp(sig['ema'])}  •  ATR = {_fp(sig['atr'])}")
+            lines.append(
+                f"   {ta_30} EMA{EMA_PERIOD}={_fp(sig['ema'])}{ta_htf}{adx_s}"
+                f"  •  ATR={_fp(sig['atr'])}"
+            )
             if sig["pattern"]:
                 lines.append(f"   Паттерн: {sig['pattern']}")
             rr_str = f"  •  R:R 1:{sig['rr']}" if sig["rr"] else ""
@@ -812,11 +900,27 @@ async def analyze_pair(
             await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
 
     # 3. Уровни и сигналы
-    levels  = find_support_resistance(df)
-    signals = find_entry_signals(df, levels, current_price)
+    levels = find_support_resistance(df)
+
+    # HTF тренд (4h) + ADX на рабочем TF
+    htf_trend, htf_ema = _calc_htf_trend(client, pair)
+    adx_val, plus_di, minus_di = _calc_adx(df, ADX_PERIOD)
+    logger.info(
+        "%s | HTF(%s)=%s  ADX=%.1f (+DI=%.1f -DI=%.1f)",
+        pair, HTF_TIMEFRAME, htf_trend or "N/A", adx_val, plus_di, minus_di,
+    )
+
+    signals = find_entry_signals(
+        df, levels, current_price,
+        htf_trend=htf_trend,
+        adx_val=adx_val,
+    )
 
     # 4. Сохраняем отчёт в БД (без авто-отправки — доступен по кнопке монеты)
-    portfolio.save_report(pair, fmt_analysis(pair, TIMEFRAME, current_price, levels, signals))
+    portfolio.save_report(pair, fmt_analysis(
+        pair, TIMEFRAME, current_price, levels, signals,
+        htf_trend=htf_trend, htf_ema=htf_ema, adx=round(adx_val, 1),
+    ))
 
     # 5. Ордера: всегда только для ближайшего уровня по направлению
     best: Dict[str, Optional[Dict]] = {"LONG": None, "SHORT": None}
@@ -955,7 +1059,8 @@ async def post_init(app: Application) -> None:
         f"(из ${portfolio.initial_balance:,.2f})\n"
         f"Маржа на сделку: {TRADE_SIZE_PERCENT}%  •  Плечо: <b>{LEVERAGE}×</b>  •  Max: {MAX_OPEN_TRADES}\n"
         f"SL: ATR×{SL_ATR_MULT}  •  TP: ближ. уровень (мин ATR×{TP_ATR_MIN_MULT})  •  Min R:R 1:{MIN_RR}\n"
-        f"ATR period: {ATR_PERIOD}  •  EMA: {EMA_PERIOD}  •  Entry proximity: {ENTRY_PROXIMITY_PERCENT}%\n\n"
+        f"ATR period: {ATR_PERIOD}  •  EMA{EMA_PERIOD}  •  Entry proximity: {ENTRY_PROXIMITY_PERCENT}%\n"
+        f"Тренд-фильтры: {HTF_TIMEFRAME} EMA{HTF_EMA_PERIOD}  •  ADX≥{ADX_MIN} (period {ADX_PERIOD})\n\n"
         f"Первый анализ через ~15 сек."
     )
     try:
