@@ -561,7 +561,7 @@ def _fp(price: float) -> str:
 REPLY_KB = ReplyKeyboardMarkup(
     [
         ["📊 Статистика", "📋 Лог сделок", "📂 Позиции"],
-        ["🪙 Монеты"],
+        ["⏳ Ордера", "🪙 Монеты"],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -794,6 +794,26 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
     return "\n".join(lines)
 
 
+def fmt_pending_orders(ptf: PaperPortfolio) -> str:
+    orders = ptf.pending_orders
+    if not orders:
+        return "⏳ <b>Ожидающих ордеров нет</b>\n\n<i>Ордера появятся когда цена подойдёт к уровню.</i>"
+    lines = [f"⏳ <b>ОЖИДАЮЩИЕ ОРДЕРА</b>  ({len(orders)} шт.)", ""]
+    for o in orders:
+        de     = "📈" if o["direction"] == "LONG" else "📉"
+        ep     = o["entry_price"]
+        sl_pct = o.get("risk_pct")   or (round(abs(ep - o["sl"]) / ep * 100, 2) if ep else "?")
+        tp_pct = o.get("reward_pct") or (round(abs(o["tp"] - ep) / ep * 100, 2) if ep else "?")
+        rr     = o.get("rr")
+        rr_str = f"  •  R:R 1:{rr}" if rr else ""
+        lines.append(
+            f"{de} <b>#{o['id']}</b>  {o['pair']}  •  {o['direction']}\n"
+            f"   Лимит: <b>{_fp(ep)}</b>\n"
+            f"   SL: {_fp(o['sl'])}  (-{sl_pct}%)  •  TP: {_fp(o['tp'])}  (+{tp_pct}%){rr_str}"
+        )
+    return "\n".join(lines)
+
+
 def _fetch_current_prices(client, trades: List[Dict]) -> Dict[str, float]:
     if not client or not trades:
         return {}
@@ -948,6 +968,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             context.bot_data.get("client"), portfolio.open_trades
         )
         msg = fmt_open_trades(portfolio, prices)
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
+    elif "Ордера" in txt:
+        msg = fmt_pending_orders(portfolio)
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
     elif "Монеты" in txt:
         pairs = context.bot_data.get("pairs", TRADING_PAIRS)
