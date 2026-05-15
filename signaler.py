@@ -741,26 +741,13 @@ def fmt_stats(ptf: PaperPortfolio) -> str:
 
 
 def fmt_log(ptf: PaperPortfolio, n: int = 20) -> str:
-    open_trades = ptf.open_trades
-    closed      = ptf.recent_trades(n)
-    if not open_trades and not closed:
-        return "📋 <b>Лог сделок</b>\n\n<i>Сделок пока нет.</i>"
-    lines = [f"📋 <b>Лог сделок</b>  (закрытых: {len(ptf.closed_trades)}, открытых: {len(open_trades)})", ""]
+    closed = ptf.recent_trades(n)
+    total  = len(ptf.closed_trades)
+    if not closed:
+        return "📋 <b>Лог сделок</b>\n\n<i>Закрытых сделок пока нет.</i>"
+    lines = [f"📋 <b>Лог сделок</b>  (всего закрытых: {total})", ""]
 
-    if open_trades:
-        lines.append("<b>— Открытые —</b>")
-        for t in open_trades:
-            de = "📈" if t["direction"] == "LONG" else "📉"
-            lines.append(
-                f"{de} <b>{t['pair']}</b> {t['direction']}  •  вход: {_fp(t['entry_price'])}"
-                f"  •  SL {_fp(t['sl'])}  TP {_fp(t['tp'])}"
-            )
-            lines.append(f"   открыта: {(t.get('opened_at') or '')[:16]}")
-        lines.append("")
-
-    if closed:
-        lines.append(f"<b>— Последние {len(closed)} закрытых —</b>")
-        for i, t in enumerate(closed, 1):
+    for i, t in enumerate(closed, 1):
             pnl  = t["pnl_usd"] or 0
             em   = "✅" if pnl > 0 else "❌"
             sign = "+" if pnl >= 0 else ""
@@ -881,6 +868,7 @@ async def analyze_pair(
     # 2. Проверка ожидающих ордеров — коснулась ли цена уровня
     triggered, cancelled = portfolio.check_pending_orders(pair, h, l)
     for trade in triggered:
+        await send_msg(bot, fmt_trade_opened(trade, portfolio.balance))
         # Та же свеча могла пробить SL — проверяем сразу после открытия
         for closed in portfolio.check_sl_tp(pair, h, l):
             await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
