@@ -31,7 +31,7 @@ _TRADE_HEADERS = [
     "id", "pair", "direction", "entry_price", "sl", "tp",
     "size_usd", "notional", "leverage", "risk_pct", "reward_pct", "rr",
     "opened_at", "closed_at", "close_price", "close_reason",
-    "pnl_usd", "pnl_percent", "status",
+    "pnl_usd", "pnl_percent", "commission", "sl_at_breakeven", "status",
 ]
 
 try:
@@ -54,12 +54,16 @@ class PaperPortfolio:
         max_open_trades: int = 5,
         pending_expiry_checks: int = 8,
         leverage: int = 1,
+        commission_rate: float = 0.001,   # 0.1% round-trip (open + close)
+        breakeven_threshold: float = 0.5,  # переносить SL при достижении 50% пути к TP
     ):
         self.initial_balance       = initial_balance
         self.trade_size_percent    = trade_size_percent
         self.max_open_trades       = max_open_trades
         self.pending_expiry_checks = pending_expiry_checks
         self.leverage              = leverage
+        self.commission_rate      = commission_rate
+        self.breakeven_threshold  = breakeven_threshold
 
         self.balance: float             = initial_balance
         self.trades: List[Dict]         = []
@@ -195,6 +199,9 @@ class PaperPortfolio:
                         t["leverage"] = int(float(t["leverage"]))
                     except (ValueError, TypeError):
                         pass
+                # Boolean field: GSheets хранит как строку "True"/"False"
+                raw_be = t.get("sl_at_breakeven")
+                t["sl_at_breakeven"] = str(raw_be).lower() in ("true", "1") if raw_be else False
                 self.trades.append(t)
 
             logger.info(
@@ -433,25 +440,27 @@ class PaperPortfolio:
 
     def _make_trade(self, order: Dict) -> Dict:
         return {
-            "id":           order["id"],
-            "pair":         order["pair"],
-            "direction":    order["direction"],
-            "entry_price":  order["entry_price"],
-            "sl":           order["sl"],
-            "tp":           order["tp"],
-            "size_usd":     order["size_usd"],
-            "notional":     order["notional"],
-            "leverage":     order["leverage"],
-            "risk_pct":     order["risk_pct"],
-            "reward_pct":   order["reward_pct"],
-            "rr":           order["rr"],
-            "opened_at":    _utcnow(),
-            "closed_at":    None,
-            "close_price":  None,
-            "close_reason": None,
-            "pnl_usd":      None,
-            "pnl_percent":  None,
-            "status":       "OPEN",
+            "id":              order["id"],
+            "pair":            order["pair"],
+            "direction":       order["direction"],
+            "entry_price":     order["entry_price"],
+            "sl":              order["sl"],
+            "tp":              order["tp"],
+            "size_usd":        order["size_usd"],
+            "notional":        order["notional"],
+            "leverage":        order["leverage"],
+            "risk_pct":        order["risk_pct"],
+            "reward_pct":      order["reward_pct"],
+            "rr":              order["rr"],
+            "opened_at":       _utcnow(),
+            "closed_at":       None,
+            "close_price":     None,
+            "close_reason":    None,
+            "pnl_usd":         None,
+            "pnl_percent":     None,
+            "commission":      None,
+            "sl_at_breakeven": False,
+            "status":          "OPEN",
         }
 
     def cancel_order(self, order: Dict) -> None:
@@ -459,6 +468,47 @@ class PaperPortfolio:
         self.orders_cancelled += 1
         self._save()
         logger.info("Ордер #%s отменён: %s %s", order["id"], order["direction"], order["pair"])
+
+    # ── Breakeven ────────────────────────────────────────────────────────────
+
+    def check_breakeven(
+        self,
+        pair: str,
+        candle_high: float,
+        candle_low: float,
+    ) -> List[Dict]:
+        """Переносит SL в безубыток когда цена прошла breakeven_threshold пути к TP."""
+        moved = []
+        for trade in self.open_trades:
+            if trade["pair"] != pair or trade.get("sl_at_breakeven"):
+                continue
+            entry = trade["entry_price"]
+            tp    = trade["tp"]
+            if trade["direction"] == "LONG":
+                target = entry + (tp - entry) * self.breakeven_threshold
+                if candle_high >= target:
+                    trade["sl"]              = entry
+                    trade["sl_at_breakeven"] = True
+                    self._trades_dirty       = True
+                    moved.append(trade)
+                    logger.info(
+                        "BE #%s %s %s: SL перенесён → %.6f",
+                        trade["id"], trade["direction"], trade["pair"], entry,
+                    )
+            else:
+                target = entry - (entry - tp) * self.breakeven_threshold
+                if candle_low <= target:
+                    trade["sl"]              = entry
+                    trade["sl_at_breakeven"] = True
+                    self._trades_dirty       = True
+                    moved.append(trade)
+                    logger.info(
+                        "BE #%s %s %s: SL перенесён → %.6f",
+                        trade["id"], trade["direction"], trade["pair"], entry,
+                    )
+        if moved:
+            self._save()
+        return moved
 
     # ── SL / TP ───────────────────────────────────────────────────────────────
 
@@ -505,10 +555,14 @@ class PaperPortfolio:
             pnl = (close_price - entry) / entry * notional
         else:
             pnl = (entry - close_price) / entry * notional
+        # Комиссия: 0.1% round-trip от notional (открытие + закрытие одной ставкой)
+        commission = round(notional * self.commission_rate, 4)
+        pnl -= commission
         pnl_pct = pnl / size_usd * 100
         trade.update(
             status="CLOSED", closed_at=_utcnow(), close_price=close_price,
             close_reason=reason, pnl_usd=round(pnl, 2), pnl_percent=round(pnl_pct, 2),
+            commission=commission,
         )
         self.balance = round(self.balance + pnl, 2)
         self._trades_dirty = True

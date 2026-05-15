@@ -18,8 +18,15 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
+
+# load_dotenv MUST come before paper_trader import so DATA_DIR is applied to file paths
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 import ccxt
 import pandas as pd
@@ -36,12 +43,6 @@ from telegram.ext import (
 )
 
 from paper_trader import PaperPortfolio
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 
 # ============================================================
@@ -68,9 +69,9 @@ TRADING_PAIRS = [
     if p.strip()
 ]
 
-TIMEFRAME             = os.getenv("TIMEFRAME", "30m")
+TIMEFRAME             = os.getenv("TIMEFRAME", "1h")
 CHECK_TIMEFRAME       = os.getenv("CHECK_TIMEFRAME", "5m")   # для проверки ордеров и SL/TP
-CANDLES_LIMIT         = int(os.getenv("CANDLES_LIMIT", "250"))
+CANDLES_LIMIT         = int(os.getenv("CANDLES_LIMIT", "500"))
 MIN_TOUCHES           = int(os.getenv("MIN_TOUCHES", "3"))
 TOLERANCE_PERCENT     = float(os.getenv("TOLERANCE_PERCENT", "0.8"))
 EXTREMA_WINDOW        = int(os.getenv("EXTREMA_WINDOW", "8"))
@@ -114,8 +115,15 @@ PUMP_SL_BUFFER        = float(os.getenv("PUMP_SL_BUFFER",     "0.35"))  # % вы
 CRASH_PAUSE_ATR_RATIO = float(os.getenv("CRASH_PAUSE_ATR_RATIO", "2.5"))
 CRASH_RESUME_ATR_RATIO= float(os.getenv("CRASH_RESUME_ATR_RATIO","2.0"))
 
-DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
-RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.05"))
+DELAY_BETWEEN_PAIRS       = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
+# Полный анализ (уровни + сигналы) — рекомендуется 1h при TIMEFRAME=1h
+RUN_INTERVAL_HOURS        = float(os.getenv("RUN_INTERVAL_HOURS", "1.0"))
+# Быстрая проверка SL/TP и ожидающих ордеров
+SL_TP_CHECK_INTERVAL_MIN  = int(os.getenv("SL_TP_CHECK_INTERVAL_MIN", "3"))
+# Комиссия round-trip (открытие + закрытие), MEXC maker ≈ 0.1%
+COMMISSION_RATE           = float(os.getenv("COMMISSION_RATE", "0.001"))
+# Доля пути к TP для переноса SL в безубыток (0.5 = 50%)
+BREAKEVEN_THRESHOLD       = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
 
 # --- Paper trading ---
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
@@ -146,6 +154,8 @@ portfolio = PaperPortfolio(
     max_open_trades=MAX_OPEN_TRADES,
     pending_expiry_checks=PENDING_EXPIRY_CHECKS,
     leverage=LEVERAGE,
+    commission_rate=COMMISSION_RATE,
+    breakeven_threshold=BREAKEVEN_THRESHOLD,
 )
 
 
@@ -831,17 +841,30 @@ def fmt_trade_opened(trade: Dict, balance: float) -> str:
     )
 
 
+def fmt_sl_to_breakeven(trade: Dict) -> str:
+    de = "📈" if trade["direction"] == "LONG" else "📉"
+    return (
+        f"🔒 <b>SL → безубыток #{trade['id']}</b>\n"
+        f"{de} <b>{trade['pair']}</b>  •  {trade['direction']}\n"
+        f"Новый SL: <b>{_fp(trade['entry_price'])}</b>  (= цена входа)"
+    )
+
+
 def fmt_trade_closed(trade: Dict, balance: float) -> str:
     won    = (trade["pnl_usd"] or 0) > 0
     emoji  = "✅" if won else "❌"
     reason = "ТЕЙК-ПРОФИТ 🎯" if trade["close_reason"] == "TP" else "СТОП-ЛОСС 🛑"
     sign   = "+" if (trade["pnl_usd"] or 0) >= 0 else ""
+    comm   = trade.get("commission")
+    comm_line = f"\nКомиссия: <b>-${comm}</b>" if comm else ""
+    be_line = "\n<i>SL был перенесён в безубыток</i>" if trade.get("sl_at_breakeven") else ""
     return (
         f"{emoji} <b>{reason} #{trade['id']}</b>\n"
         f"<b>{trade['pair']}</b>  •  {trade['direction']}\n"
         f"━━━━━━━━━━━━━━\n"
         f"Вход: {_fp(trade['entry_price'])} → Закрыт: <b>{_fp(trade['close_price'])}</b>\n"
-        f"P&L: <b>{sign}${trade['pnl_usd']}  ({sign}{trade['pnl_percent']}%)</b>\n"
+        f"P&L: <b>{sign}${trade['pnl_usd']}  ({sign}{trade['pnl_percent']}%)</b>"
+        f"{comm_line}{be_line}\n"
         f"Equity: <b>${balance:,.2f}</b>"
     )
 
@@ -868,10 +891,10 @@ def fmt_stats(ptf: PaperPortfolio) -> str:
     ]
     if s["best"]:
         b = s["best"]
-        lines.append(f"🏆 Лучшая:  <b>+${b['pnl_usd']}</b>  ({b['pair']} {b['direction']})")
+        lines.append(f"🏆 Лучшая:  <b>+${b['pnl_usd'] or 0}</b>  ({b['pair']} {b['direction']})")
     if s["worst"]:
         w = s["worst"]
-        lines.append(f"💔 Худшая:  <b>${w['pnl_usd']}</b>  ({w['pair']} {w['direction']})")
+        lines.append(f"💔 Худшая:  <b>${w['pnl_usd'] or 0}</b>  ({w['pair']} {w['direction']})")
     lines.append(f"\n<i>v{BOT_VERSION}</i>")
     return "\n".join(lines)
 
@@ -890,7 +913,7 @@ def fmt_log(ptf: PaperPortfolio, n: int = 20) -> str:
         rsn  = "TP" if t["close_reason"] == "TP" else "SL"
         lines.append(
             f"{i}. {em} <b>{t['pair']}</b> {t['direction']} [{rsn}]  "
-            f"<b>{sign}${t['pnl_usd']}</b> ({sign}{t['pnl_percent']}%)"
+            f"<b>{sign}${t['pnl_usd'] or 0}</b> ({sign}{t['pnl_percent'] or 0}%)"
         )
         lines.append(
             f"   {_fp(t['entry_price'])} → {_fp(t['close_price'])}"
@@ -900,18 +923,16 @@ def fmt_log(ptf: PaperPortfolio, n: int = 20) -> str:
 
 
 def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
-    open_t   = ptf.open_trades
-    pending  = ptf.pending_orders
-    if not open_t and not pending:
-        return "📂 <b>Активных позиций нет</b>\n\n<i>Жду сигналов...</i>"
+    open_t = ptf.open_trades
+    if not open_t:
+        return "📂 <b>Открытых позиций нет</b>\n\n<i>Для просмотра ожидающих ордеров нажми ⏳ Ордера.</i>"
 
-    lines = ["📂 <b>ТЕКУЩИЕ ПОЗИЦИИ</b>", ""]
+    lines = [f"📂 <b>ОТКРЫТЫЕ ПОЗИЦИИ</b>  ({len(open_t)} шт.)", ""]
 
     for t in open_t:
         de  = "📈" if t["direction"] == "LONG" else "📉"
         cur = prices.get(t["pair"])
         if cur:
-            lev  = t.get("leverage", 1)
             ntl  = t.get("notional", t["size_usd"])
             upnl = ((cur - t["entry_price"]) / t["entry_price"] * ntl
                     if t["direction"] == "LONG"
@@ -922,27 +943,16 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
         else:
             pnl_line = ""
         ep = t["entry_price"]
-        sl_pct = t.get("risk_pct") or (round(abs(ep - t["sl"]) / ep * 100, 2) if ep else "?")
-        tp_pct = t.get("reward_pct") or (round(abs(t["tp"] - ep) / ep * 100, 2) if ep else "?")
+        # Всегда пересчитываем от текущего SL — важно после переноса в безубыток
+        sl_pct = round(abs(ep - t["sl"]) / ep * 100, 2) if ep else "?"
+        tp_pct = round(abs(t["tp"] - ep) / ep * 100, 2) if ep else "?"
+        be_mark = " 🔒" if t.get("sl_at_breakeven") else ""
         lines.append(
-            f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}\n"
+            f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}{be_mark}\n"
             f"   Вход: {_fp(ep)}\n"
             f"   SL: {_fp(t['sl'])}  (-{sl_pct}%)  •  TP: {_fp(t['tp'])}  (+{tp_pct}%)"
             f"{pnl_line}"
         )
-
-    if pending:
-        lines += ["", "⏳ <b>Ожидающие ордера:</b>"]
-        for o in pending:
-            de = "📈" if o["direction"] == "LONG" else "📉"
-            ep = o["entry_price"]
-            sl_pct = o.get("risk_pct") or (round(abs(ep - o["sl"]) / ep * 100, 2) if ep else "?")
-            tp_pct = o.get("reward_pct") or (round(abs(o["tp"] - ep) / ep * 100, 2) if ep else "?")
-            lines.append(
-                f"{de} <b>#{o['id']}</b> {o['pair']}  •  {o['direction']}\n"
-                f"   Лимит: {_fp(ep)}  "
-                f"SL: {_fp(o['sl'])}  (-{sl_pct}%)  •  TP: {_fp(o['tp'])}  (+{tp_pct}%)"
-            )
 
     return "\n".join(lines)
 
@@ -1017,13 +1027,17 @@ async def analyze_pair(
     h = max(h, current_price)
     l = min(l, current_price)
 
-    # 1. Закрытие открытых сделок по SL/TP
+    # 1. Безубыток → SL/TP для уже открытых сделок
+    for trade in portfolio.check_breakeven(pair, h, l):
+        await send_msg(bot, fmt_sl_to_breakeven(trade))
     for trade in portfolio.check_sl_tp(pair, h, l):
         await send_msg(bot, fmt_trade_closed(trade, portfolio.get_equity()))
 
     # 2. Проверка ожидающих ордеров — коснулась ли цена уровня
     triggered, _ = portfolio.check_pending_orders(pair, h, l)
-    # Та же свеча могла сразу пробить SL/TP у только что открытых сделок
+    # Та же свеча могла сразу достичь BE или SL/TP у только что открытых сделок
+    for trade in portfolio.check_breakeven(pair, h, l):
+        await send_msg(bot, fmt_sl_to_breakeven(trade))
     for closed in portfolio.check_sl_tp(pair, h, l):
         await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
 
@@ -1032,11 +1046,12 @@ async def analyze_pair(
 
     # HTF тренд (4h) + ADX на рабочем TF
     htf_trend, htf_ema = _calc_htf_trend(client, pair)
-    adx_val, plus_di, minus_di = _calc_adx(df, ADX_PERIOD)
+    adx_val, _, _ = _calc_adx(df, ADX_PERIOD)
 
     # RSI + ATR-ratio → режим рынка
     rsi_series = _calc_rsi_series(df, RSI_PERIOD)
-    rsi_val    = float(rsi_series.iloc[-1])
+    rsi_raw    = float(rsi_series.iloc[-1])
+    rsi_val    = rsi_raw if not pd.isna(rsi_raw) else 50.0  # NaN → нейтральное значение
     atr_ratio  = _calc_atr_ratio(df, ATR_PERIOD)
     regime     = _detect_regime(rsi_series, atr_ratio)
     crash_low  = _find_crash_low(df, CRASH_LOW_LOOKBACK)  if regime == "RECOVERY"   else None
@@ -1169,6 +1184,60 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 # ============================================================
+# JOB: БЫСТРАЯ ПРОВЕРКА SL/TP (каждые N минут)
+# ============================================================
+async def fast_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    client = context.bot_data.get("client")
+    bot    = context.bot
+    if not client:
+        return
+
+    pairs = (
+        {t["pair"] for t in portfolio.open_trades} |
+        {o["pair"] for o in portfolio.pending_orders}
+    )
+    if not pairs:
+        return
+
+    logger.info("=== Быстрая проверка SL/TP (%d пар) ===", len(pairs))
+    for pair in pairs:
+        try:
+            try:
+                current_price = float(client.fetch_ticker(pair)["last"])
+            except Exception:
+                continue
+            portfolio.update_price(pair, current_price)
+
+            try:
+                raw = client.fetch_ohlcv(pair, CHECK_TIMEFRAME, limit=5)
+                if raw and len(raw) >= 2:
+                    h = max(r[2] for r in raw[-2:])
+                    l = min(r[3] for r in raw[-2:])
+                else:
+                    raise ValueError("мало свечей")
+            except Exception:
+                h = l = current_price
+            h = max(h, current_price)
+            l = min(l, current_price)
+
+            for trade in portfolio.check_breakeven(pair, h, l):
+                await send_msg(bot, fmt_sl_to_breakeven(trade))
+
+            for closed in portfolio.check_sl_tp(pair, h, l):
+                await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
+
+            triggered, _ = portfolio.check_pending_orders(pair, h, l)
+            if triggered:
+                for trade in portfolio.check_breakeven(pair, h, l):
+                    await send_msg(bot, fmt_sl_to_breakeven(trade))
+                for closed in portfolio.check_sl_tp(pair, h, l):
+                    await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
+
+        except Exception as exc:
+            logger.error("fast_check %s: %s", pair, exc)
+
+
+# ============================================================
 # JOB: ПЕРИОДИЧЕСКИЙ АНАЛИЗ
 # ============================================================
 async def analysis_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1199,10 +1268,12 @@ async def post_init(app: Application) -> None:
     text = (
         f"🚀 <b>Signaler + Paper Trading запущен</b>\n"
         f"Пары: {pairs_mode}  •  TF: <code>{TIMEFRAME}</code>\n"
-        f"Режим: <b>{mode}</b>\n\n"
+        f"Режим: анализ каждые <b>{mode}</b>  •  SL/TP каждые <b>{SL_TP_CHECK_INTERVAL_MIN} мин</b>\n\n"
         f"💰 Equity: <b>${portfolio.get_equity():,.2f}</b>  "
         f"(из ${portfolio.initial_balance:,.2f})\n"
         f"Маржа на сделку: {TRADE_SIZE_PERCENT}%  •  Плечо: <b>{LEVERAGE}×</b>  •  Max: {MAX_OPEN_TRADES}\n"
+        f"Комиссия: <b>{COMMISSION_RATE*100:.2f}%</b> round-trip  •  "
+        f"Безубыток при <b>{int(BREAKEVEN_THRESHOLD*100)}%</b> пути к TP\n"
         f"SL: ATR×{SL_ATR_MULT}  •  TP: ближ. уровень (мин ATR×{TP_ATR_MIN_MULT})  •  Min R:R 1:{MIN_RR}\n"
         f"ATR period: {ATR_PERIOD}  •  EMA{EMA_PERIOD}  •  Entry proximity: {ENTRY_PROXIMITY_PERCENT}%\n"
         f"Тренд-фильтры: {HTF_TIMEFRAME} EMA{HTF_EMA_PERIOD}  •  ADX≥{ADX_MIN} (period {ADX_PERIOD})\n\n"
@@ -1240,13 +1311,21 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
+    # Быстрая проверка SL/TP + безубыток (стартует через 30 сек, затем каждые N мин)
+    check_sec = SL_TP_CHECK_INTERVAL_MIN * 60
+    app.job_queue.run_repeating(fast_check_job, interval=check_sec, first=30)
+
+    # Полный анализ уровней и сигналов (стартует через 15 сек, затем каждые RUN_INTERVAL_HOURS)
     interval_sec = int(RUN_INTERVAL_HOURS * 3600)
     if interval_sec > 0:
         app.job_queue.run_repeating(analysis_job, interval=interval_sec, first=15)
     else:
         app.job_queue.run_once(analysis_job, when=15)
 
-    logger.info("Бот запущен, анализ каждые %.1fч.", RUN_INTERVAL_HOURS)
+    logger.info(
+        "Бот запущен: анализ каждые %.1fч, SL/TP проверка каждые %d мин.",
+        RUN_INTERVAL_HOURS, SL_TP_CHECK_INTERVAL_MIN,
+    )
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
