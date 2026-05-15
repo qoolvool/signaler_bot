@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 
 import ccxt
 import pandas as pd
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from telegram import Bot, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -556,25 +556,11 @@ def _fp(price: float) -> str:
 REPLY_KB = ReplyKeyboardMarkup(
     [
         ["📊 Статистика", "📋 Лог сделок", "📂 Позиции"],
-        ["📈 Монеты"],
     ],
     resize_keyboard=True,
     is_persistent=True,
 )
 
-
-def _build_pairs_keyboard() -> InlineKeyboardMarkup:
-    buttons: list = []
-    row: list = []
-    for pair in TRADING_PAIRS:
-        base = pair.split("/")[0]
-        row.append(InlineKeyboardButton(base, callback_data=f"report:{pair}"))
-        if len(row) == 4:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    return InlineKeyboardMarkup(buttons)
 
 
 def fmt_analysis(
@@ -990,38 +976,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         msg = fmt_open_trades(portfolio, prices)
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
-    elif "Монеты" in txt:
-        await update.message.reply_text(
-            "📈 <b>Выбери монету для просмотра отчёта:</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=_build_pairs_keyboard(),
-        )
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    data = query.data or ""
-
-    if data == "pairs_list":
-        await query.edit_message_text(
-            "📈 <b>Выбери монету для просмотра отчёта:</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=_build_pairs_keyboard(),
-        )
-        return
-
-    if data.startswith("report:"):
-        pair = data[7:]
-        report = portfolio.get_report(pair)
-        if report:
-            msg = f"{report['text']}\n\n<i>🕒 Обновлено: {report.get('saved_at', '')}</i>"
-        else:
-            msg = f"⚠️ <i>Отчёт по {pair} ещё не готов — подождите следующего цикла анализа.</i>"
-        back_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("⬅️ К монетам", callback_data="pairs_list")
-        ]])
-        await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=back_kb)
 
 
 # ============================================================
