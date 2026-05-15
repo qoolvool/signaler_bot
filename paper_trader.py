@@ -54,16 +54,22 @@ class PaperPortfolio:
         max_open_trades: int = 5,
         pending_expiry_checks: int = 8,
         leverage: int = 1,
-        commission_rate: float = 0.001,   # 0.1% round-trip (open + close)
-        breakeven_threshold: float = 0.5,  # переносить SL при достижении 50% пути к TP
+        commission_rate: float = 0.001,
+        breakeven_threshold: float = 0.5,
+        fixed_risk_mode: bool = True,
+        risk_per_trade_percent: float = 1.0,
+        max_trade_size_percent: float = 20.0,
     ):
-        self.initial_balance       = initial_balance
-        self.trade_size_percent    = trade_size_percent
-        self.max_open_trades       = max_open_trades
-        self.pending_expiry_checks = pending_expiry_checks
-        self.leverage              = leverage
-        self.commission_rate      = commission_rate
-        self.breakeven_threshold  = breakeven_threshold
+        self.initial_balance        = initial_balance
+        self.trade_size_percent     = trade_size_percent
+        self.max_open_trades        = max_open_trades
+        self.pending_expiry_checks  = pending_expiry_checks
+        self.leverage               = leverage
+        self.commission_rate        = commission_rate
+        self.breakeven_threshold    = breakeven_threshold
+        self.fixed_risk_mode        = fixed_risk_mode
+        self.risk_per_trade_percent = risk_per_trade_percent
+        self.max_trade_size_percent = max_trade_size_percent
 
         self.balance: float             = initial_balance
         self.trades: List[Dict]         = []
@@ -358,8 +364,17 @@ class PaperPortfolio:
             logger.info("Лимит позиций (%d) достигнут.", self.max_open_trades)
             return None
 
-        # БАГ 21 fix: размер фиксируется сейчас, но исполнится позже — кэпим по текущему балансу
-        size_usd   = round(min(self.balance * self.trade_size_percent / 100.0, self.balance), 2)
+        if self.fixed_risk_mode:
+            sl_pct = abs(entry_price - sl) / entry_price
+            if sl_pct > 0 and self.leverage > 0:
+                risk_amount = self.balance * self.risk_per_trade_percent / 100.0
+                size_usd = risk_amount / (sl_pct * self.leverage)
+                size_usd = min(size_usd, self.balance * self.max_trade_size_percent / 100.0)
+            else:
+                size_usd = self.balance * self.trade_size_percent / 100.0
+        else:
+            size_usd = self.balance * self.trade_size_percent / 100.0
+        size_usd = round(min(size_usd, self.balance), 2)
         notional   = round(size_usd * self.leverage, 2)
         risk_pct   = round(abs(entry_price - sl) / entry_price * 100, 2)
         reward_pct = round(abs(tp - entry_price) / entry_price * 100, 2)
@@ -395,6 +410,8 @@ class PaperPortfolio:
         pair: str,
         candle_high: float,
         candle_low: float,
+        candle_close: Optional[float] = None,
+        require_bounce: bool = False,
     ) -> Tuple[List[Dict], List[Dict]]:
         triggered: List[Dict] = []
         cancelled: List[Dict] = []
@@ -412,6 +429,12 @@ class PaperPortfolio:
                 (order["direction"] == "LONG"  and candle_low  <= order["entry_price"]) or
                 (order["direction"] == "SHORT" and candle_high >= order["entry_price"])
             )
+
+            if hit and require_bounce and candle_close is not None:
+                if order["direction"] == "LONG" and candle_close <= order["entry_price"]:
+                    hit = False  # коснулась уровня, но закрытие ниже — отскок не подтверждён
+                elif order["direction"] == "SHORT" and candle_close >= order["entry_price"]:
+                    hit = False  # коснулась уровня, но закрытие выше — отскок не подтверждён
 
             if hit:
                 trade = self._make_trade(order)
