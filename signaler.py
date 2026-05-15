@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 
 import ccxt
 import pandas as pd
-from telegram import Bot, ReplyKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -561,10 +561,26 @@ def _fp(price: float) -> str:
 REPLY_KB = ReplyKeyboardMarkup(
     [
         ["📊 Статистика", "📋 Лог сделок", "📂 Позиции"],
+        ["🪙 Монеты"],
     ],
     resize_keyboard=True,
     is_persistent=True,
 )
+
+
+def _pairs_inline_kb(pairs: List[str]) -> InlineKeyboardMarkup:
+    """Инлайн-клавиатура со списком монет для просмотра отчётов."""
+    buttons = []
+    row: List[InlineKeyboardButton] = []
+    for pair in pairs:
+        label = pair.replace("/USDT", "")
+        row.append(InlineKeyboardButton(label, callback_data=f"report_{pair}"))
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons)
 
 
 
@@ -935,11 +951,33 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         msg = fmt_open_trades(portfolio, prices)
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
+    elif "Монеты" in txt:
+        pairs = context.bot_data.get("pairs", TRADING_PAIRS)
+        await update.message.reply_text(
+            "🪙 Выбери монету для просмотра последнего отчёта:",
+            reply_markup=_pairs_inline_kb(pairs),
+        )
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    data = query.data or ""
+    if data.startswith("report_"):
+        pair = data[len("report_"):]
+        report = portfolio.get_report(pair)
+        if report:
+            text = report["text"]
+            saved = (report.get("saved_at") or "")[:16]
+            await query.message.reply_text(
+                f"{text}\n\n<i>Сохранён: {saved}</i>",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await query.message.reply_text(
+                f"⚠️ Отчёт по <b>{pair}</b> пока не готов — подожди первого цикла анализа.",
+                parse_mode=ParseMode.HTML,
+            )
 
 
 # ============================================================
@@ -950,6 +988,7 @@ async def analysis_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     bot    = context.bot
 
     pairs = fetch_top_pairs(client, AUTO_TOP_PAIRS) if AUTO_TOP_PAIRS > 0 else TRADING_PAIRS
+    context.bot_data["pairs"] = pairs
     logger.info("=== Запуск анализа (%d пар) ===", len(pairs))
 
     for idx, pair in enumerate(pairs):
