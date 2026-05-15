@@ -1,6 +1,15 @@
 """
 Paper trading simulation engine.
-Storage: MongoDB Atlas (if MONGODB_URI is set) or JSON files as fallback.
+Storage: Google Sheets (primary) or JSON files (fallback).
+
+Google Sheets setup:
+  1. Google Cloud Console → Service Accounts → create → download JSON key
+  2. Share the spreadsheet with the service account e-mail (Editor)
+  3. Set env vars:
+       GOOGLE_SPREADSHEET_ID=<id from spreadsheet URL>
+       GOOGLE_CREDENTIALS_JSON=<full content of JSON key>   (recommended)
+       OR
+       GOOGLE_CREDENTIALS_FILE=<path to JSON key file>
 """
 
 import json
@@ -18,11 +27,23 @@ TRADES_FILE    = _BASE / "trades.json"
 PORTFOLIO_FILE = _BASE / "portfolio.json"
 REPORTS_FILE   = _BASE / "reports.json"
 
+_TRADE_HEADERS = [
+    "id", "pair", "direction", "entry_price", "sl", "tp",
+    "size_usd", "notional", "leverage", "risk_pct", "reward_pct", "rr",
+    "opened_at", "closed_at", "close_price", "close_reason",
+    "pnl_usd", "pnl_percent", "status",
+]
+
 try:
-    from pymongo import MongoClient
-    _PYMONGO = True
+    import gspread
+    from google.oauth2.service_account import Credentials as _SACredentials
+    _GSPREAD_OK = True
 except ImportError:
-    _PYMONGO = False
+    _GSPREAD_OK = False
+
+
+def _cell(v) -> str:
+    return "" if v is None else str(v)
 
 
 class PaperPortfolio:
@@ -39,108 +60,170 @@ class PaperPortfolio:
         self.max_open_trades       = max_open_trades
         self.pending_expiry_checks = pending_expiry_checks
         self.leverage              = leverage
-        self.balance: float           = initial_balance
-        self.trades: List[Dict]       = []
-        self.pending_orders: List[Dict] = []
-        self.orders_created: int      = 0
-        self.orders_cancelled: int    = 0
 
-        self._col_portfolio = None
-        self._col_trades    = None
-        self._col_reports   = None
-        self.reports: Dict[str, Dict] = {}
+        self.balance: float             = initial_balance
+        self.trades: List[Dict]         = []
+        self.pending_orders: List[Dict] = []
+        self.orders_created: int        = 0
+        self.orders_cancelled: int      = 0
+
+        self._ws_portfolio = None
+        self._ws_trades    = None
+        self._ws_reports   = None
+        self._trades_dirty = False  # True = trades sheet needs rewrite
+
+        self.reports: Dict[str, Dict]   = {}
         self._live_prices: Dict[str, float] = {}
-        self._connect_mongo()
+
+        self._connect_gsheets()
         self._load()
 
-    # ── MongoDB connection ────────────────────────────────────────────────────
+    # ── Google Sheets connection ──────────────────────────────────────────────
 
-    def _connect_mongo(self) -> None:
-        uri = os.getenv("MONGODB_URI", "")
-        if not uri:
+    def _connect_gsheets(self) -> None:
+        spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID", "")
+        if not spreadsheet_id:
             return
-        if not _PYMONGO:
-            logger.warning("pymongo не установлен — используются файлы. Запусти: pip install pymongo[srv]")
+        if not _GSPREAD_OK:
+            logger.warning(
+                "gspread не установлен — используются файлы. "
+                "Запусти: pip install gspread google-auth"
+            )
+            return
+        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+        creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "")
+        if not creds_json and not creds_file:
+            logger.warning(
+                "GOOGLE_SPREADSHEET_ID задан, но ключи не найдены. "
+                "Укажи GOOGLE_CREDENTIALS_JSON или GOOGLE_CREDENTIALS_FILE."
+            )
             return
         try:
-            client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-            client.admin.command("ping")
-            db = client["signaler_bot"]
-            self._col_portfolio = db["portfolio"]
-            self._col_trades    = db["trades"]
-            self._col_reports   = db["reports"]
-            logger.info("MongoDB Atlas подключён ✓")
+            scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ]
+            creds = (
+                _SACredentials.from_service_account_info(
+                    json.loads(creds_json), scopes=scopes
+                )
+                if creds_json
+                else _SACredentials.from_service_account_file(
+                    creds_file, scopes=scopes
+                )
+            )
+            gc = gspread.authorize(creds)
+            ss = gc.open_by_key(spreadsheet_id)
+            self._ws_portfolio = self._init_sheet(
+                ss, "Portfolio",
+                ["balance", "initial_balance", "orders_created",
+                 "orders_cancelled", "pending_orders_json", "updated_at"],
+            )
+            self._ws_trades  = self._init_sheet(ss, "Trades",  _TRADE_HEADERS)
+            self._ws_reports = self._init_sheet(ss, "Reports", ["pair", "text", "saved_at"])
+            logger.info("Google Sheets подключён ✓  id=%s", spreadsheet_id)
         except Exception as exc:
-            logger.error("MongoDB недоступен, использую файлы: %s", exc)
+            logger.error("Google Sheets недоступен, использую файлы: %s", exc)
+
+    def _init_sheet(self, ss, title: str, headers: List[str]):
+        try:
+            ws = ss.worksheet(title)
+        except gspread.WorksheetNotFound:
+            ws = ss.add_worksheet(title=title, rows="1000", cols=str(len(headers) + 2))
+        if not ws.row_values(1):
+            ws.update("A1", [headers])
+        return ws
 
     @property
-    def _use_mongo(self) -> bool:
-        return self._col_portfolio is not None
+    def _use_gsheets(self) -> bool:
+        return self._ws_portfolio is not None
 
     # ── load / save ───────────────────────────────────────────────────────────
 
     def _load(self) -> None:
-        if self._use_mongo:
-            self._load_mongo()
+        if self._use_gsheets:
+            self._load_gsheets()
         else:
             self._load_files()
 
     def _save(self) -> None:
-        if self._use_mongo:
-            self._save_mongo()
+        if self._use_gsheets:
+            self._save_gsheets()
         else:
             self._save_files()
 
-    def _load_mongo(self) -> None:
+    # ── Google Sheets ─────────────────────────────────────────────────────────
+
+    def _load_gsheets(self) -> None:
         try:
-            state = self._col_portfolio.find_one({"_id": "main"})
-            if state:
-                self.balance           = state.get("balance",           self.initial_balance)
-                self.initial_balance   = state.get("initial_balance",   self.initial_balance)
-                self.pending_orders    = state.get("pending_orders",    [])
-                self.orders_created    = state.get("orders_created",    0)
-                self.orders_cancelled  = state.get("orders_cancelled",  0)
-            self.trades = list(self._col_trades.find({}, {"_id": 0}))
+            rows = self._ws_portfolio.get_all_records()
+            if rows:
+                r = rows[0]
+                self.balance          = float(r.get("balance",          self.initial_balance))
+                self.initial_balance  = float(r.get("initial_balance",  self.initial_balance))
+                self.orders_created   = int(float(r.get("orders_created",  0)))
+                self.orders_cancelled = int(float(r.get("orders_cancelled", 0)))
+                raw = r.get("pending_orders_json") or "[]"
+                self.pending_orders   = json.loads(raw)
+
+            trade_rows = self._ws_trades.get_all_records()
+            self.trades = []
+            for r in trade_rows:
+                t = {k: (None if v == "" else v) for k, v in r.items()}
+                for f in ("entry_price", "sl", "tp", "size_usd", "notional",
+                          "risk_pct", "reward_pct", "rr", "pnl_usd", "pnl_percent"):
+                    if t.get(f) is not None:
+                        try:
+                            t[f] = float(t[f])
+                        except (ValueError, TypeError):
+                            t[f] = None
+                if t.get("leverage") is not None:
+                    try:
+                        t["leverage"] = int(float(t["leverage"]))
+                    except (ValueError, TypeError):
+                        pass
+                self.trades.append(t)
+
             logger.info(
-                "Загружено из MongoDB: баланс $%.2f, сделок %d, ордеров %d",
+                "Загружено из Google Sheets: баланс $%.2f, сделок %d, ордеров %d",
                 self.balance, len(self.trades), len(self.pending_orders),
             )
         except Exception as exc:
-            logger.error("Ошибка загрузки из MongoDB: %s", exc)
+            logger.error("Ошибка загрузки из Google Sheets: %s", exc)
 
-    def _save_mongo(self) -> None:
+    def _save_gsheets(self) -> None:
         try:
-            self._col_portfolio.replace_one(
-                {"_id": "main"},
-                {
-                    "_id":              "main",
-                    "balance":          self.balance,
-                    "initial_balance":  self.initial_balance,
-                    "pending_orders":   self.pending_orders,
-                    "orders_created":   self.orders_created,
-                    "orders_cancelled": self.orders_cancelled,
-                    "updated_at":       _utcnow(),
-                },
-                upsert=True,
-            )
-            for trade in self.trades:
-                self._col_trades.replace_one(
-                    {"id": trade["id"]},
-                    trade,
-                    upsert=True,
-                )
+            # Portfolio: update single data row — 1 API call
+            self._ws_portfolio.update("A2", [[
+                self.balance,
+                self.initial_balance,
+                self.orders_created,
+                self.orders_cancelled,
+                json.dumps(self.pending_orders, ensure_ascii=False),
+                _utcnow(),
+            ]])
+            # Trades: full rewrite only when something changed — 2 API calls
+            if self._trades_dirty:
+                rows = [_TRADE_HEADERS] + [
+                    [_cell(t.get(h)) for h in _TRADE_HEADERS] for t in self.trades
+                ]
+                self._ws_trades.clear()
+                self._ws_trades.update("A1", rows)
+                self._trades_dirty = False
         except Exception as exc:
-            logger.error("Ошибка сохранения в MongoDB: %s", exc)
+            logger.error("Ошибка сохранения в Google Sheets: %s", exc)
+
+    # ── JSON files ────────────────────────────────────────────────────────────
 
     def _load_files(self) -> None:
         if PORTFOLIO_FILE.exists():
             try:
                 data = json.loads(PORTFOLIO_FILE.read_text(encoding="utf-8"))
-                self.balance           = data.get("balance",           self.initial_balance)
-                self.initial_balance   = data.get("initial_balance",   self.initial_balance)
-                self.pending_orders    = data.get("pending_orders",    [])
-                self.orders_created    = data.get("orders_created",    0)
-                self.orders_cancelled  = data.get("orders_cancelled",  0)
+                self.balance          = data.get("balance",          self.initial_balance)
+                self.initial_balance  = data.get("initial_balance",  self.initial_balance)
+                self.pending_orders   = data.get("pending_orders",   [])
+                self.orders_created   = data.get("orders_created",   0)
+                self.orders_cancelled = data.get("orders_cancelled", 0)
             except Exception as exc:
                 logger.error("Ошибка чтения portfolio.json: %s", exc)
         if TRADES_FILE.exists():
@@ -179,7 +262,7 @@ class PaperPortfolio:
         except Exception as exc:
             logger.error("Ошибка сохранения данных: %s", exc)
 
-    # ── live prices / equity ─────────────────────────────────────────────────
+    # ── live prices / equity ──────────────────────────────────────────────────
 
     def update_price(self, pair: str, price: float) -> None:
         self._live_prices[pair] = price
@@ -298,11 +381,12 @@ class PaperPortfolio:
             if hit:
                 trade = self._make_trade(order)
                 self.trades.append(trade)
+                self._trades_dirty = True
                 triggered.append(trade)
                 logger.info(
                     "Ордер #%s исполнен: %s %s @ %.6f | баланс $%.2f",
-                    trade["id"], trade["direction"], trade["pair"], trade["entry_price"],
-                    self.balance,
+                    trade["id"], trade["direction"], trade["pair"],
+                    trade["entry_price"], self.balance,
                 )
             elif order["checks_remaining"] <= 0:
                 cancelled.append(order)
@@ -362,19 +446,19 @@ class PaperPortfolio:
                 continue
             close_price, reason = None, None
             if trade["direction"] == "LONG":
-                if candle_low  <= trade["sl"]: close_price, reason = trade["sl"], "SL"
-                elif candle_high >= trade["tp"]: close_price, reason = trade["tp"], "TP"
+                if candle_low  <= trade["sl"]:   close_price, reason = trade["sl"], "SL"
+                elif candle_high >= trade["tp"]:  close_price, reason = trade["tp"], "TP"
             else:
-                if candle_high >= trade["sl"]: close_price, reason = trade["sl"], "SL"
-                elif candle_low  <= trade["tp"]: close_price, reason = trade["tp"], "TP"
+                if candle_high >= trade["sl"]:   close_price, reason = trade["sl"], "SL"
+                elif candle_low  <= trade["tp"]:  close_price, reason = trade["tp"], "TP"
             if close_price is not None:
                 closed.append(self._close_trade(trade, close_price, reason))
         return closed
 
     def _close_trade(self, trade: Dict, close_price: float, reason: str) -> Dict:
-        notional   = trade.get("notional", trade["size_usd"])
-        entry      = trade["entry_price"]
-        size_usd   = trade["size_usd"]
+        notional = trade.get("notional", trade["size_usd"])
+        entry    = trade["entry_price"]
+        size_usd = trade["size_usd"]
         if not entry or not size_usd:
             logger.error(
                 "Сделка #%s имеет entry_price=%s size_usd=%s — принудительное закрытие",
@@ -384,6 +468,7 @@ class PaperPortfolio:
                 status="CLOSED", closed_at=_utcnow(), close_price=close_price,
                 close_reason=reason, pnl_usd=0.0, pnl_percent=0.0,
             )
+            self._trades_dirty = True
             self._save()
             return trade
         if trade["direction"] == "LONG":
@@ -396,6 +481,7 @@ class PaperPortfolio:
             close_reason=reason, pnl_usd=round(pnl, 2), pnl_percent=round(pnl_pct, 2),
         )
         self.balance = round(self.balance + pnl, 2)
+        self._trades_dirty = True
         self._save()
         logger.info(
             "Закрыта #%s %s %s: %s @ %.6f | PnL $%.2f (%.2f%%) | баланс $%.2f",
@@ -407,14 +493,22 @@ class PaperPortfolio:
     # ── reports ───────────────────────────────────────────────────────────────
 
     def save_report(self, pair: str, text: str) -> None:
-        doc = {"pair": pair, "text": text, "saved_at": _utcnow()}
-        if self._use_mongo:
+        if self._use_gsheets:
             try:
-                self._col_reports.replace_one({"pair": pair}, doc, upsert=True)
+                cell = None
+                try:
+                    cell = self._ws_reports.find(pair, in_column=1)
+                except Exception:
+                    pass
+                row = [pair, text, _utcnow()]
+                if cell:
+                    self._ws_reports.update(f"A{cell.row}", [row])
+                else:
+                    self._ws_reports.append_row(row)
             except Exception as exc:
                 logger.error("Ошибка сохранения отчёта %s: %s", pair, exc)
         else:
-            self.reports[pair] = doc
+            self.reports[pair] = {"pair": pair, "text": text, "saved_at": _utcnow()}
             try:
                 REPORTS_FILE.write_text(
                     json.dumps(self.reports, indent=2, ensure_ascii=False),
@@ -424,12 +518,15 @@ class PaperPortfolio:
                 logger.error("Ошибка записи reports.json: %s", exc)
 
     def get_report(self, pair: str) -> Optional[Dict]:
-        if self._use_mongo:
+        if self._use_gsheets:
             try:
-                return self._col_reports.find_one({"pair": pair}, {"_id": 0})
+                cell = self._ws_reports.find(pair, in_column=1)
+                if cell:
+                    row = self._ws_reports.row_values(cell.row)
+                    return {"pair": row[0], "text": row[1], "saved_at": row[2] if len(row) > 2 else ""}
             except Exception as exc:
                 logger.error("Ошибка загрузки отчёта %s: %s", pair, exc)
-                return None
+            return None
         return self.reports.get(pair)
 
     # ── statistics ────────────────────────────────────────────────────────────
@@ -445,7 +542,6 @@ class PaperPortfolio:
         bal_chg   = (equity - self.initial_balance) / self.initial_balance * 100
         best  = max(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
         worst = min(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
-        triggered = len(self.trades)
         return {
             "balance":            self.balance,
             "equity":             equity,
@@ -463,7 +559,7 @@ class PaperPortfolio:
             "worst":              worst,
             "orders_created":     self.orders_created,
             "orders_cancelled":   self.orders_cancelled,
-            "orders_triggered":   max(triggered, 0),
+            "orders_triggered":   len(self.trades),
         }
 
     def recent_trades(self, n: int = 10) -> List[Dict]:
