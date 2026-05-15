@@ -377,9 +377,14 @@ class PaperPortfolio:
         size_usd   = trade["size_usd"]
         if not entry or not size_usd:
             logger.error(
-                "Сделка #%s имеет entry_price=%s size_usd=%s — пропуск закрытия",
+                "Сделка #%s имеет entry_price=%s size_usd=%s — принудительное закрытие",
                 trade["id"], entry, size_usd,
             )
+            trade.update(
+                status="CLOSED", closed_at=_utcnow(), close_price=close_price,
+                close_reason=reason, pnl_usd=0.0, pnl_percent=0.0,
+            )
+            self._save()
             return trade
         if trade["direction"] == "LONG":
             pnl = (close_price - entry) / entry * notional
@@ -440,7 +445,7 @@ class PaperPortfolio:
         bal_chg   = (equity - self.initial_balance) / self.initial_balance * 100
         best  = max(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
         worst = min(closed, key=lambda x: x["pnl_usd"] or 0, default=None)
-        triggered = self.orders_created - self.orders_cancelled
+        triggered = len(self.trades)
         return {
             "balance":            self.balance,
             "equity":             equity,
