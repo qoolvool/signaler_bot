@@ -830,9 +830,9 @@ async def analyze_pair(
     triggered, cancelled = portfolio.check_pending_orders(pair, h, l)
     for trade in triggered:
         await send_msg(bot, fmt_trade_opened(trade, portfolio.get_equity()))
-        # Та же свеча могла пробить SL — проверяем сразу после открытия
-        for closed in portfolio.check_sl_tp(pair, h, l):
-            await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
+    # Та же свеча могла сразу пробить SL/TP у только что открытых сделок
+    for closed in portfolio.check_sl_tp(pair, h, l):
+        await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
 
     # 3. Уровни и сигналы
     levels = find_support_resistance(df)
