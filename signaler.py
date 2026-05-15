@@ -68,7 +68,7 @@ TRADING_PAIRS = [
     if p.strip()
 ]
 
-TIMEFRAME             = os.getenv("TIMEFRAME", "30m")
+TIMEFRAME             = os.getenv("TIMEFRAME", "1h")
 CHECK_TIMEFRAME       = os.getenv("CHECK_TIMEFRAME", "5m")   # для проверки ордеров и SL/TP
 CANDLES_LIMIT         = int(os.getenv("CANDLES_LIMIT", "500"))
 MIN_TOUCHES           = int(os.getenv("MIN_TOUCHES", "3"))
