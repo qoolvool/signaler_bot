@@ -431,16 +431,16 @@ def _detect_regime(rsi_series: pd.Series, atr_ratio: float) -> str:
     """Возвращает 'CRASH'/'RECOVERY'/'PUMP'/'CORRECTION'/'NORMAL'."""
     curr_rsi = float(rsi_series.iloc[-1])
     if atr_ratio >= CRASH_PAUSE_ATR_RATIO:
-        # Отличаем направление паники по RSI
         return "CRASH" if curr_rsi < 50 else "PUMP"
     if atr_ratio < CRASH_RESUME_ATR_RATIO:
-        lookback_n = max(RSI_OVERSOLD_LOOKBACK, RSI_OVERBOUGHT_LOOKBACK)
-        recent = rsi_series.iloc[-lookback_n:]
-        if bool((recent.iloc[-RSI_OVERSOLD_LOOKBACK:] < RSI_OVERSOLD).any()) \
-                and curr_rsi < RSI_RECOVERY_MAX:
+        # БАГ 1 fix: берём срезы напрямую из исходной серии, без двойного среза
+        was_panic  = bool((rsi_series.iloc[-RSI_OVERSOLD_LOOKBACK:]  < RSI_OVERSOLD).any())
+        was_pump   = bool((rsi_series.iloc[-RSI_OVERBOUGHT_LOOKBACK:] > RSI_OVERBOUGHT).any())
+        # БАГ 2 fix: CORRECTION активна пока RSI > RSI_CORRECTION_MIN (55),
+        # т.е. цена ещё высоко — коррекция только началась. Аналог RECOVERY: RSI < RSI_RECOVERY_MAX.
+        if was_panic and curr_rsi < RSI_RECOVERY_MAX:
             return "RECOVERY"
-        if bool((recent.iloc[-RSI_OVERBOUGHT_LOOKBACK:] > RSI_OVERBOUGHT).any()) \
-                and curr_rsi > RSI_CORRECTION_MIN:
+        if was_pump and curr_rsi > RSI_CORRECTION_MIN:
             return "CORRECTION"
     return "NORMAL"
 
@@ -524,6 +524,10 @@ def find_entry_signals(
     ema_trend   = "UP" if current_price > ema_val else "DOWN"
     pattern     = _detect_candle_pattern(df)
     atr         = _calc_atr(df, atr_period)
+    # БАГ 7 fix: ATR может быть NaN при недостатке данных — всё что дальше использует его сломается
+    if pd.isna(atr) or atr <= 0:
+        logger.warning("ATR некорректен (%.6f) для %s — сигналы пропущены", atr, regime)
+        return []
     recovery    = (regime == "RECOVERY")
     correction  = (regime == "CORRECTION")
     special     = recovery or correction  # оба режима отключают стандартные фильтры
@@ -582,6 +586,13 @@ def find_entry_signals(
                 key=lambda x: x["price"], reverse=True,
             )
             tp = below[0]["price"] if below and below[0]["price"] <= entry - tp_min else entry - tp_min
+        elif special:
+            # БАГ 3/4 fix: спецрежим без опорной цены — ATR-fallback, предупреждаем
+            logger.warning("режим %s без crash_low/pump_high — SL по ATR", regime)
+            sl_dist = atr * sl_atr_mult
+            tp_min  = sl_dist * min_rr
+            sl = entry - sl_dist if recovery else entry + sl_dist
+            tp = entry + tp_min  if recovery else entry - tp_min
         else:
             sl_dist = atr * sl_atr_mult
             tp_min  = atr * tp_atr_min_mult
@@ -730,7 +741,16 @@ def fmt_analysis(
     # RSI + ATR-ratio + режим рынка
     rsi_str = ""
     if rsi is not None:
-        rsi_label = "🔴 перепродан" if rsi < RSI_OVERSOLD else ("🟡 восст." if rsi < RSI_RECOVERY_MAX else "🟢 норма")
+        if rsi < RSI_OVERSOLD:
+            rsi_label = "🔴 перепродан"
+        elif rsi < RSI_RECOVERY_MAX:
+            rsi_label = "🟡 восст."
+        elif rsi > RSI_OVERBOUGHT:
+            rsi_label = "🔴 перекуплен"
+        elif rsi > RSI_CORRECTION_MIN:
+            rsi_label = "🟡 корр."
+        else:
+            rsi_label = "🟢 норма"
         rsi_str = f"RSI: <b>{rsi:.1f}</b> ({rsi_label})"
     ratio_str = ""
     if atr_ratio is not None:

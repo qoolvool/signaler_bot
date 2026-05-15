@@ -324,7 +324,8 @@ class PaperPortfolio:
             logger.info("Лимит позиций (%d) достигнут.", self.max_open_trades)
             return None
 
-        size_usd   = round(self.balance * self.trade_size_percent / 100.0, 2)
+        # БАГ 21 fix: размер фиксируется сейчас, но исполнится позже — кэпим по текущему балансу
+        size_usd   = round(min(self.balance * self.trade_size_percent / 100.0, self.balance), 2)
         notional   = round(size_usd * self.leverage, 2)
         risk_pct   = round(abs(entry_price - sl) / entry_price * 100, 2)
         reward_pct = round(abs(tp - entry_price) / entry_price * 100, 2)
@@ -446,11 +447,13 @@ class PaperPortfolio:
                 continue
             close_price, reason = None, None
             if trade["direction"] == "LONG":
-                if candle_low  <= trade["sl"]:   close_price, reason = trade["sl"], "SL"
-                elif candle_high >= trade["tp"]:  close_price, reason = trade["tp"], "TP"
+                # БАГ 12 fix: TP проверяем первым — если свеча пробила оба уровня,
+                # нельзя определить порядок; TP-first даёт нейтральную оценку.
+                if candle_high >= trade["tp"]:   close_price, reason = trade["tp"], "TP"
+                elif candle_low <= trade["sl"]:  close_price, reason = trade["sl"], "SL"
             else:
-                if candle_high >= trade["sl"]:   close_price, reason = trade["sl"], "SL"
-                elif candle_low  <= trade["tp"]:  close_price, reason = trade["tp"], "TP"
+                if candle_low  <= trade["tp"]:   close_price, reason = trade["tp"], "TP"
+                elif candle_high >= trade["sl"]: close_price, reason = trade["sl"], "SL"
             if close_price is not None:
                 closed.append(self._close_trade(trade, close_price, reason))
         return closed
@@ -523,6 +526,9 @@ class PaperPortfolio:
                 cell = self._ws_reports.find(pair, in_column=1)
                 if cell:
                     row = self._ws_reports.row_values(cell.row)
+                    # БАГ 16 fix: защита от неполных строк
+                    if len(row) < 2:
+                        return None
                     return {"pair": row[0], "text": row[1], "saved_at": row[2] if len(row) > 2 else ""}
             except Exception as exc:
                 logger.error("Ошибка загрузки отчёта %s: %s", pair, exc)
