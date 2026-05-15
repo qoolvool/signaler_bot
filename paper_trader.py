@@ -167,7 +167,20 @@ class PaperPortfolio:
                 self.pending_orders   = json.loads(raw)
 
             trade_rows = self._ws_trades.get_all_records()
-            self.trades = []
+            # If trades sheet is empty but a JSON backup exists, recover from it
+            if not trade_rows and TRADES_FILE.exists():
+                try:
+                    self.trades = json.loads(TRADES_FILE.read_text(encoding="utf-8"))
+                    logger.warning(
+                        "Trades sheet пуст — восстановлено %d сделок из JSON-резерва.",
+                        len(self.trades),
+                    )
+                    self._trades_dirty = True  # schedule rewrite to GSheets
+                    trade_rows = []  # skip the parsing loop below
+                except Exception as exc:
+                    logger.error("Ошибка чтения резервного trades.json: %s", exc)
+                    trade_rows = []
+            self.trades = [] if trade_rows else self.trades
             for r in trade_rows:
                 t = {k: (None if v == "" else v) for k, v in r.items()}
                 for f in ("entry_price", "sl", "tp", "size_usd", "notional",
@@ -202,13 +215,24 @@ class PaperPortfolio:
                 json.dumps(self.pending_orders, ensure_ascii=False),
                 _utcnow(),
             ]])
-            # Trades: full rewrite only when something changed — 2 API calls
+            # Trades: full rewrite only when something changed
             if self._trades_dirty:
+                # JSON backup first — protects data if GSheets write is interrupted
+                try:
+                    TRADES_FILE.write_text(
+                        json.dumps(self.trades, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
                 rows = [_TRADE_HEADERS] + [
                     [_cell(t.get(h)) for h in _TRADE_HEADERS] for t in self.trades
                 ]
-                self._ws_trades.clear()
+                n = len(rows)
+                # Write data first (no empty-sheet window), then trim stale trailing rows
                 self._ws_trades.update("A1", rows)
+                if self._ws_trades.row_count > n:
+                    self._ws_trades.resize(rows=n)
                 self._trades_dirty = False
         except Exception as exc:
             logger.error("Ошибка сохранения в Google Sheets: %s", exc)
@@ -314,6 +338,9 @@ class PaperPortfolio:
         sl: float,
         tp: float,
     ) -> Optional[Dict]:
+        if self.balance <= 0:
+            logger.warning("Баланс <= 0 ($%.2f) — создание ордеров остановлено.", self.balance)
+            return None
         if self.has_pending_order(pair, direction):
             logger.info("Ордер %s %s уже ожидает.", direction, pair)
             return None
@@ -324,7 +351,8 @@ class PaperPortfolio:
             logger.info("Лимит позиций (%d) достигнут.", self.max_open_trades)
             return None
 
-        size_usd   = round(self.balance * self.trade_size_percent / 100.0, 2)
+        # БАГ 21 fix: размер фиксируется сейчас, но исполнится позже — кэпим по текущему балансу
+        size_usd   = round(min(self.balance * self.trade_size_percent / 100.0, self.balance), 2)
         notional   = round(size_usd * self.leverage, 2)
         risk_pct   = round(abs(entry_price - sl) / entry_price * 100, 2)
         reward_pct = round(abs(tp - entry_price) / entry_price * 100, 2)
@@ -399,7 +427,7 @@ class PaperPortfolio:
                 remaining.append(order)
 
         self.pending_orders = remaining
-        if triggered or cancelled or pair_had_orders:
+        if triggered or cancelled:
             self._save()
         return triggered, cancelled
 
@@ -446,11 +474,13 @@ class PaperPortfolio:
                 continue
             close_price, reason = None, None
             if trade["direction"] == "LONG":
-                if candle_low  <= trade["sl"]:   close_price, reason = trade["sl"], "SL"
-                elif candle_high >= trade["tp"]:  close_price, reason = trade["tp"], "TP"
+                # БАГ 12 fix: TP проверяем первым — если свеча пробила оба уровня,
+                # нельзя определить порядок; TP-first даёт нейтральную оценку.
+                if candle_high >= trade["tp"]:   close_price, reason = trade["tp"], "TP"
+                elif candle_low <= trade["sl"]:  close_price, reason = trade["sl"], "SL"
             else:
-                if candle_high >= trade["sl"]:   close_price, reason = trade["sl"], "SL"
-                elif candle_low  <= trade["tp"]:  close_price, reason = trade["tp"], "TP"
+                if candle_low  <= trade["tp"]:   close_price, reason = trade["tp"], "TP"
+                elif candle_high >= trade["sl"]: close_price, reason = trade["sl"], "SL"
             if close_price is not None:
                 closed.append(self._close_trade(trade, close_price, reason))
         return closed
@@ -523,6 +553,9 @@ class PaperPortfolio:
                 cell = self._ws_reports.find(pair, in_column=1)
                 if cell:
                     row = self._ws_reports.row_values(cell.row)
+                    # БАГ 16 fix: защита от неполных строк
+                    if len(row) < 2:
+                        return None
                     return {"pair": row[0], "text": row[1], "saved_at": row[2] if len(row) > 2 else ""}
             except Exception as exc:
                 logger.error("Ошибка загрузки отчёта %s: %s", pair, exc)

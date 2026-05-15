@@ -96,6 +96,24 @@ HTF_EMA_PERIOD = int(os.getenv("HTF_EMA_PERIOD", "50"))   # EMA на HTF
 ADX_PERIOD     = int(os.getenv("ADX_PERIOD", "14"))    # период ADX
 ADX_MIN        = float(os.getenv("ADX_MIN",  "20"))    # ниже = боковик, не торговать
 
+# --- Краш-детектор и режим восстановления / Памп-детектор и режим коррекции ---
+RSI_PERIOD            = int(os.getenv("RSI_PERIOD",            "14"))
+# Падение
+RSI_OVERSOLD          = float(os.getenv("RSI_OVERSOLD",        "30"))   # ниже = паника продаж
+RSI_RECOVERY_MAX      = float(os.getenv("RSI_RECOVERY_MAX",    "47"))   # выше = отскок завершён
+RSI_OVERSOLD_LOOKBACK = int(os.getenv("RSI_OVERSOLD_LOOKBACK", "12"))   # свечей назад
+CRASH_LOW_LOOKBACK    = int(os.getenv("CRASH_LOW_LOOKBACK",    "24"))   # свечей для поиска лоя
+CRASH_SL_BUFFER       = float(os.getenv("CRASH_SL_BUFFER",    "0.35"))  # % ниже лоя краша для SL
+# Рост
+RSI_OVERBOUGHT        = float(os.getenv("RSI_OVERBOUGHT",      "70"))   # выше = памп
+RSI_CORRECTION_MIN    = float(os.getenv("RSI_CORRECTION_MIN",  "55"))   # ниже = коррекция завершена
+RSI_OVERBOUGHT_LOOKBACK = int(os.getenv("RSI_OVERBOUGHT_LOOKBACK","12"))
+PUMP_HIGH_LOOKBACK    = int(os.getenv("PUMP_HIGH_LOOKBACK",    "24"))   # свечей для поиска хая
+PUMP_SL_BUFFER        = float(os.getenv("PUMP_SL_BUFFER",     "0.35"))  # % выше хая памп для SL
+# Общий ATR-ratio порог (один для обоих направлений)
+CRASH_PAUSE_ATR_RATIO = float(os.getenv("CRASH_PAUSE_ATR_RATIO", "2.5"))
+CRASH_RESUME_ATR_RATIO= float(os.getenv("CRASH_RESUME_ATR_RATIO","2.0"))
+
 DELAY_BETWEEN_PAIRS  = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
 RUN_INTERVAL_HOURS   = float(os.getenv("RUN_INTERVAL_HOURS", "0.05"))
 
@@ -384,6 +402,57 @@ def _calc_adx(df: pd.DataFrame, period: int = 14):
     return float(adx.iloc[-1]), float(pdi.iloc[-1]), float(ndi.iloc[-1])
 
 
+def _calc_rsi_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    delta = df["close"].diff()
+    gain  = delta.where(delta > 0, 0.0)
+    loss  = -delta.where(delta < 0, 0.0)
+    avg_g = gain.ewm(alpha=1.0 / period, adjust=False).mean()
+    avg_l = loss.ewm(alpha=1.0 / period, adjust=False).mean()
+    rs    = avg_g / avg_l.replace(0, float("nan"))
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _calc_atr_ratio(df: pd.DataFrame, atr_period: int = 14, avg_period: int = 20) -> float:
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"]  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    atr_series = tr.rolling(atr_period).mean().dropna()
+    if len(atr_series) < avg_period + 1:
+        return 1.0
+    current      = float(atr_series.iloc[-1])
+    hist_avg     = float(atr_series.iloc[-(avg_period + 1):-1].mean())
+    return round(current / hist_avg, 2) if hist_avg > 0 else 1.0
+
+
+def _detect_regime(rsi_series: pd.Series, atr_ratio: float) -> str:
+    """Возвращает 'CRASH'/'RECOVERY'/'PUMP'/'CORRECTION'/'NORMAL'."""
+    curr_rsi = float(rsi_series.iloc[-1])
+    if atr_ratio >= CRASH_PAUSE_ATR_RATIO:
+        return "CRASH" if curr_rsi < 50 else "PUMP"
+    if atr_ratio < CRASH_RESUME_ATR_RATIO:
+        # БАГ 1 fix: берём срезы напрямую из исходной серии, без двойного среза
+        was_panic  = bool((rsi_series.iloc[-RSI_OVERSOLD_LOOKBACK:]  < RSI_OVERSOLD).any())
+        was_pump   = bool((rsi_series.iloc[-RSI_OVERBOUGHT_LOOKBACK:] > RSI_OVERBOUGHT).any())
+        # БАГ 2 fix: CORRECTION активна пока RSI > RSI_CORRECTION_MIN (55),
+        # т.е. цена ещё высоко — коррекция только началась. Аналог RECOVERY: RSI < RSI_RECOVERY_MAX.
+        if was_panic and RSI_OVERSOLD < curr_rsi < RSI_RECOVERY_MAX:
+            return "RECOVERY"
+        if was_pump and curr_rsi > RSI_CORRECTION_MIN:
+            return "CORRECTION"
+    return "NORMAL"
+
+
+def _find_crash_low(df: pd.DataFrame, lookback: int = 20) -> float:
+    return float(df["low"].iloc[-lookback:].min())
+
+
+def _find_pump_high(df: pd.DataFrame, lookback: int = 20) -> float:
+    return float(df["high"].iloc[-lookback:].max())
+
+
 def _calc_htf_trend(client, pair: str):
     """Фетчит HTF-свечи, возвращает ('UP'/'DOWN'/None, ema_val/None)."""
     try:
@@ -438,18 +507,33 @@ def find_entry_signals(
     tp_atr_min_mult: float = TP_ATR_MIN_MULT,
     min_rr: float = MIN_RR,
     adx_min: float = ADX_MIN,
+    regime: str = "NORMAL",
+    crash_low: Optional[float] = None,
+    pump_high: Optional[float] = None,
 ) -> List[Dict]:
+    # Во время паники (краш или памп) — не создавать новых ордеров
+    if regime in ("CRASH", "PUMP"):
+        return []
+
     if ema_period >= len(df):
         logger.warning("Недостаточно свечей для EMA%d (%d)", ema_period, len(df))
         return []
-    proximity = proximity_percent / 100.0
-    ema_val   = float(_calc_ema(df["close"], ema_period).iloc[-1])
-    ema_trend = "UP" if current_price > ema_val else "DOWN"
-    pattern   = _detect_candle_pattern(df)
-    atr       = _calc_atr(df, atr_period)
 
-    # ADX фильтр: боковик — не торговать
-    if adx_val is not None and adx_min > 0 and adx_val < adx_min:
+    proximity   = proximity_percent / 100.0
+    ema_val     = float(_calc_ema(df["close"], ema_period).iloc[-1])
+    ema_trend   = "UP" if current_price > ema_val else "DOWN"
+    pattern     = _detect_candle_pattern(df)
+    atr         = _calc_atr(df, atr_period)
+    # БАГ 7 fix: ATR может быть NaN при недостатке данных — всё что дальше использует его сломается
+    if pd.isna(atr) or atr <= 0:
+        logger.warning("ATR некорректен (%.6f) для %s — сигналы пропущены", atr, regime)
+        return []
+    recovery    = (regime == "RECOVERY")
+    correction  = (regime == "CORRECTION")
+    special     = recovery or correction  # оба режима отключают стандартные фильтры
+
+    # ADX фильтр пропускаем в спецрежимах — рынок только вышел из аномального движения
+    if not special and adx_val is not None and adx_min > 0 and adx_val < adx_min:
         logger.info("ADX %.1f < %.1f — боковик, сигналы пропущены", adx_val, adx_min)
         return []
 
@@ -458,49 +542,86 @@ def find_entry_signals(
         distance = abs(current_price - lvl["price"]) / lvl["price"]
         if distance > proximity:
             continue
-        if lvl["type"] == "SUPPORT" and ema_trend == "UP":
+
+        if recovery:
+            if lvl["type"] != "SUPPORT":
+                continue
             direction = "LONG"
-        elif lvl["type"] == "RESISTANCE" and ema_trend == "DOWN":
+        elif correction:
+            if lvl["type"] != "RESISTANCE":
+                continue
             direction = "SHORT"
         else:
-            continue
-
-        # HTF фильтр: LONG только при 4h UP, SHORT только при 4h DOWN
-        if htf_trend is not None:
-            required = "UP" if direction == "LONG" else "DOWN"
-            if htf_trend != required:
+            if lvl["type"] == "SUPPORT" and ema_trend == "UP":
+                direction = "LONG"
+            elif lvl["type"] == "RESISTANCE" and ema_trend == "DOWN":
+                direction = "SHORT"
+            else:
                 continue
+            if htf_trend is not None:
+                if htf_trend != ("UP" if direction == "LONG" else "DOWN"):
+                    continue
 
-        entry    = lvl["price"]
-        sl_dist  = atr * sl_atr_mult
-        tp_min   = atr * tp_atr_min_mult
+        entry = lvl["price"]
 
-        if direction == "LONG":
-            sl = entry - sl_dist
-            above = sorted(
+        if recovery and crash_low is not None:
+            sl      = crash_low * (1.0 - CRASH_SL_BUFFER / 100.0)
+            sl_dist = entry - sl
+            if sl_dist <= 0:
+                continue
+            tp_min = sl_dist * min_rr
+            above  = sorted(
                 [l for l in levels if l["type"] == "RESISTANCE" and l["price"] > entry],
                 key=lambda x: x["price"],
             )
-            if above:
-                nearest = above[0]["price"]
-                if nearest < entry + tp_min:
-                    continue  # ближайшее сопротивление слишком близко — заблокирует TP
-                tp = nearest
-            else:
-                tp = entry + tp_min  # нет сопротивлений — ATR-фоллбэк
-        else:
-            sl = entry + sl_dist
-            below = sorted(
+            tp = above[0]["price"] if above and above[0]["price"] >= entry + tp_min else entry + tp_min
+        elif correction and pump_high is not None:
+            sl      = pump_high * (1.0 + PUMP_SL_BUFFER / 100.0)
+            sl_dist = sl - entry
+            if sl_dist <= 0:
+                continue
+            tp_min = sl_dist * min_rr
+            below  = sorted(
                 [l for l in levels if l["type"] == "SUPPORT" and l["price"] < entry],
                 key=lambda x: x["price"], reverse=True,
             )
-            if below:
-                nearest = below[0]["price"]
-                if nearest > entry - tp_min:
-                    continue  # ближайшая поддержка слишком близко — заблокирует TP
-                tp = nearest
+            tp = below[0]["price"] if below and below[0]["price"] <= entry - tp_min else entry - tp_min
+        elif special:
+            # БАГ 3/4 fix: спецрежим без опорной цены — ATR-fallback, предупреждаем
+            logger.warning("режим %s без crash_low/pump_high — SL по ATR", regime)
+            sl_dist = atr * sl_atr_mult
+            tp_min  = sl_dist * min_rr
+            sl = entry - sl_dist if recovery else entry + sl_dist
+            tp = entry + tp_min  if recovery else entry - tp_min
+        else:
+            sl_dist = atr * sl_atr_mult
+            tp_min  = atr * tp_atr_min_mult
+            if direction == "LONG":
+                sl    = entry - sl_dist
+                above = sorted(
+                    [l for l in levels if l["type"] == "RESISTANCE" and l["price"] > entry],
+                    key=lambda x: x["price"],
+                )
+                if above:
+                    nearest = above[0]["price"]
+                    if nearest < entry + tp_min:
+                        continue
+                    tp = nearest
+                else:
+                    tp = entry + tp_min
             else:
-                tp = entry - tp_min  # нет поддержек — ATR-фоллбэк
+                sl    = entry + sl_dist
+                below = sorted(
+                    [l for l in levels if l["type"] == "SUPPORT" and l["price"] < entry],
+                    key=lambda x: x["price"], reverse=True,
+                )
+                if below:
+                    nearest = below[0]["price"]
+                    if nearest > entry - tp_min:
+                        continue
+                    tp = nearest
+                else:
+                    tp = entry - tp_min
 
         tp_dist    = abs(tp - entry)
         rr         = round(tp_dist / sl_dist, 1) if sl_dist > 0 else None
@@ -525,6 +646,7 @@ def find_entry_signals(
             "rr":               rr,
             "risk_pct":         risk_pct,
             "reward_pct":       reward_pct,
+            "regime":           regime,
         })
     return signals
 
@@ -561,7 +683,7 @@ def _fp(price: float) -> str:
 REPLY_KB = ReplyKeyboardMarkup(
     [
         ["📊 Статистика", "📋 Лог сделок", "📂 Позиции"],
-        ["🪙 Монеты"],
+        ["⏳ Ордера", "🪙 Монеты"],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -593,6 +715,9 @@ def fmt_analysis(
     htf_trend: Optional[str] = None,
     htf_ema: Optional[float] = None,
     adx: Optional[float] = None,
+    rsi: Optional[float] = None,
+    atr_ratio: Optional[float] = None,
+    regime: str = "NORMAL",
 ) -> str:
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     lines = [
@@ -613,6 +738,34 @@ def fmt_analysis(
         adx_str = f"  •  ADX: <b>{adx:.1f}</b> ({label})"
     if htf_str or adx_str:
         lines.append(f"📡{htf_str}{adx_str}")
+    # RSI + ATR-ratio + режим рынка
+    rsi_str = ""
+    if rsi is not None:
+        if rsi < RSI_OVERSOLD:
+            rsi_label = "🔴 перепродан"
+        elif rsi < RSI_RECOVERY_MAX:
+            rsi_label = "🟡 восст."
+        elif rsi > RSI_OVERBOUGHT:
+            rsi_label = "🔴 перекуплен"
+        elif rsi > RSI_CORRECTION_MIN:
+            rsi_label = "🟡 корр."
+        else:
+            rsi_label = "🟢 норма"
+        rsi_str = f"RSI: <b>{rsi:.1f}</b> ({rsi_label})"
+    ratio_str = ""
+    if atr_ratio is not None:
+        ratio_str = f"ATR×: <b>{atr_ratio:.1f}</b>"
+    regime_map = {
+        "CRASH":      "⚠️ КРАШ — пауза",
+        "RECOVERY":   "🔄 ВОССТАНОВЛЕНИЕ",
+        "PUMP":       "🚀 ПАМП — пауза",
+        "CORRECTION": "📉 КОРРЕКЦИЯ",
+        "NORMAL":     "",
+    }
+    regime_str = regime_map.get(regime, "")
+    extra = "  •  ".join(filter(None, [rsi_str, ratio_str, regime_str]))
+    if extra:
+        lines.append(f"⚡ {extra}")
     lines.append("")
 
     if signals:
@@ -794,6 +947,26 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
     return "\n".join(lines)
 
 
+def fmt_pending_orders(ptf: PaperPortfolio) -> str:
+    orders = ptf.pending_orders
+    if not orders:
+        return "⏳ <b>Ожидающих ордеров нет</b>\n\n<i>Ордера появятся когда цена подойдёт к уровню.</i>"
+    lines = [f"⏳ <b>ОЖИДАЮЩИЕ ОРДЕРА</b>  ({len(orders)} шт.)", ""]
+    for o in orders:
+        de     = "📈" if o["direction"] == "LONG" else "📉"
+        ep     = o["entry_price"]
+        sl_pct = o.get("risk_pct")   or (round(abs(ep - o["sl"]) / ep * 100, 2) if ep else "?")
+        tp_pct = o.get("reward_pct") or (round(abs(o["tp"] - ep) / ep * 100, 2) if ep else "?")
+        rr     = o.get("rr")
+        rr_str = f"  •  R:R 1:{rr}" if rr else ""
+        lines.append(
+            f"{de} <b>#{o['id']}</b>  {o['pair']}  •  {o['direction']}\n"
+            f"   Лимит: <b>{_fp(ep)}</b>\n"
+            f"   SL: {_fp(o['sl'])}  (-{sl_pct}%)  •  TP: {_fp(o['tp'])}  (+{tp_pct}%){rr_str}"
+        )
+    return "\n".join(lines)
+
+
 def _fetch_current_prices(client, trades: List[Dict]) -> Dict[str, float]:
     if not client or not trades:
         return {}
@@ -860,18 +1033,29 @@ async def analyze_pair(
     # HTF тренд (4h) + ADX на рабочем TF
     htf_trend, htf_ema = _calc_htf_trend(client, pair)
     adx_val, plus_di, minus_di = _calc_adx(df, ADX_PERIOD)
+
+    # RSI + ATR-ratio → режим рынка
+    rsi_series = _calc_rsi_series(df, RSI_PERIOD)
+    rsi_val    = float(rsi_series.iloc[-1])
+    atr_ratio  = _calc_atr_ratio(df, ATR_PERIOD)
+    regime     = _detect_regime(rsi_series, atr_ratio)
+    crash_low  = _find_crash_low(df, CRASH_LOW_LOOKBACK)  if regime == "RECOVERY"   else None
+    pump_high  = _find_pump_high(df, PUMP_HIGH_LOOKBACK)  if regime == "CORRECTION" else None
+
     logger.info(
-        "%s | HTF(%s)=%s  ADX=%s (+DI=%s -DI=%s)",
+        "%s | HTF(%s)=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
         pair, HTF_TIMEFRAME, htf_trend or "N/A",
-        f"{adx_val:.1f}"  if adx_val  is not None else "N/A",
-        f"{plus_di:.1f}"  if plus_di  is not None else "N/A",
-        f"{minus_di:.1f}" if minus_di is not None else "N/A",
+        f"{adx_val:.1f}" if adx_val is not None else "N/A",
+        rsi_val, atr_ratio, regime,
     )
 
     signals = find_entry_signals(
         df, levels, current_price,
         htf_trend=htf_trend,
         adx_val=adx_val,
+        regime=regime,
+        crash_low=crash_low,
+        pump_high=pump_high,
     )
 
     # 4. Сохраняем отчёт в БД (без авто-отправки — доступен по кнопке монеты)
@@ -879,6 +1063,9 @@ async def analyze_pair(
         pair, TIMEFRAME, current_price, levels, signals,
         htf_trend=htf_trend, htf_ema=htf_ema,
         adx=round(adx_val, 1) if adx_val is not None else None,
+        rsi=round(rsi_val, 1),
+        atr_ratio=atr_ratio,
+        regime=regime,
     ))
 
     # 5. Ордера: всегда только для ближайшего уровня по направлению
@@ -948,6 +1135,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             context.bot_data.get("client"), portfolio.open_trades
         )
         msg = fmt_open_trades(portfolio, prices)
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
+    elif "Ордера" in txt:
+        msg = fmt_pending_orders(portfolio)
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=REPLY_KB)
     elif "Монеты" in txt:
         pairs = context.bot_data.get("pairs", TRADING_PAIRS)
