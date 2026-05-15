@@ -356,9 +356,9 @@ def _calc_atr(df: pd.DataFrame, period: int = 14) -> float:
 
 
 def _calc_adx(df: pd.DataFrame, period: int = 14):
-    """Wilder's ADX. Возвращает (adx, +DI, -DI). При нехватке данных — (0, 0, 0)."""
+    """Wilder's ADX. Возвращает (adx, +DI, -DI). При нехватке данных — (None, None, None)."""
     if len(df) < period * 2:
-        return 0.0, 0.0, 0.0
+        return None, None, None
     high  = df["high"].astype(float)
     low   = df["low"].astype(float)
     close = df["close"].astype(float)
@@ -672,45 +672,6 @@ def fmt_trade_closed(trade: Dict, balance: float) -> str:
     )
 
 
-def fmt_pending_created(order: Dict) -> str:
-    de  = "📈" if order["direction"] == "LONG" else "📉"
-    rr  = f"  •  R:R 1:{order['rr']}" if order["rr"] else ""
-    chk = order["checks_remaining"]
-    lev = order.get("leverage", 1)
-    ntl = order.get("notional", order["size_usd"])
-    return (
-        f"⏳ <b>ЛИМИТНЫЙ ОРДЕР #{order['id']}</b>\n"
-        f"{de} <b>{order['pair']}</b>  •  {order['direction']}\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"Вход (лимит): <b>{_fp(order['entry_price'])}</b>\n"
-        f"SL: <b>{_fp(order['sl'])}</b>  (-{order['risk_pct']}%)\n"
-        f"TP: <b>{_fp(order['tp'])}</b>  (+{order['reward_pct']}%){rr}\n"
-        f"Маржа: <b>${order['size_usd']}</b>  •  Плечо: <b>{lev}×</b>  •  Позиция: <b>${ntl}</b>\n"
-        f"<i>Ждём касания уровня...</i>"
-    )
-
-
-def fmt_pending_triggered(trade: Dict, balance: float) -> str:
-    de = "📈" if trade["direction"] == "LONG" else "📉"
-    return (
-        f"✅ <b>ОРДЕР ИСПОЛНЕН #{trade['id']}</b>\n"
-        f"{de} <b>{trade['pair']}</b>  •  {trade['direction']}\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"Цена коснулась уровня: <b>{_fp(trade['entry_price'])}</b>\n"
-        f"SL: <b>{_fp(trade['sl'])}</b>  (-{trade['risk_pct']}%)  •  TP: <b>{_fp(trade['tp'])}</b>  (+{trade['reward_pct']}%)\n"
-        f"Equity: ${balance:,.2f}"
-    )
-
-
-def fmt_pending_cancelled(order: Dict, reason: str = "истёк срок") -> str:
-    de = "📈" if order["direction"] == "LONG" else "📉"
-    return (
-        f"🗑 <b>ОРДЕР ОТМЕНЁН #{order['id']}</b>\n"
-        f"{de} {order['pair']}  •  {order['direction']}\n"
-        f"Уровень: {_fp(order['entry_price'])}\n"
-        f"<i>Причина: {reason}</i>"
-    )
-
 
 def fmt_stats(ptf: PaperPortfolio) -> str:
     s    = ptf.get_stats()
@@ -748,18 +709,18 @@ def fmt_log(ptf: PaperPortfolio, n: int = 20) -> str:
     lines = [f"📋 <b>Лог сделок</b>  (всего закрытых: {total})", ""]
 
     for i, t in enumerate(closed, 1):
-            pnl  = t["pnl_usd"] or 0
-            em   = "✅" if pnl > 0 else "❌"
-            sign = "+" if pnl >= 0 else ""
-            rsn  = "TP" if t["close_reason"] == "TP" else "SL"
-            lines.append(
-                f"{i}. {em} <b>{t['pair']}</b> {t['direction']} [{rsn}]  "
-                f"<b>{sign}${t['pnl_usd']}</b> ({sign}{t['pnl_percent']}%)"
-            )
-            lines.append(
-                f"   {_fp(t['entry_price'])} → {_fp(t['close_price'])}"
-                f"  •  {(t['closed_at'] or '')[:16]}"
-            )
+        pnl  = t["pnl_usd"] or 0
+        em   = "✅" if pnl > 0 else "❌"
+        sign = "+" if pnl >= 0 else ""
+        rsn  = "TP" if t["close_reason"] == "TP" else "SL"
+        lines.append(
+            f"{i}. {em} <b>{t['pair']}</b> {t['direction']} [{rsn}]  "
+            f"<b>{sign}${t['pnl_usd']}</b> ({sign}{t['pnl_percent']}%)"
+        )
+        lines.append(
+            f"   {_fp(t['entry_price'])} → {_fp(t['close_price'])}"
+            f"  •  {(t['closed_at'] or '')[:16]}"
+        )
     return "\n".join(lines)
 
 
@@ -868,7 +829,7 @@ async def analyze_pair(
     # 2. Проверка ожидающих ордеров — коснулась ли цена уровня
     triggered, cancelled = portfolio.check_pending_orders(pair, h, l)
     for trade in triggered:
-        await send_msg(bot, fmt_trade_opened(trade, portfolio.balance))
+        await send_msg(bot, fmt_trade_opened(trade, portfolio.get_equity()))
         # Та же свеча могла пробить SL — проверяем сразу после открытия
         for closed in portfolio.check_sl_tp(pair, h, l):
             await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
@@ -880,8 +841,11 @@ async def analyze_pair(
     htf_trend, htf_ema = _calc_htf_trend(client, pair)
     adx_val, plus_di, minus_di = _calc_adx(df, ADX_PERIOD)
     logger.info(
-        "%s | HTF(%s)=%s  ADX=%.1f (+DI=%.1f -DI=%.1f)",
-        pair, HTF_TIMEFRAME, htf_trend or "N/A", adx_val, plus_di, minus_di,
+        "%s | HTF(%s)=%s  ADX=%s (+DI=%s -DI=%s)",
+        pair, HTF_TIMEFRAME, htf_trend or "N/A",
+        f"{adx_val:.1f}"  if adx_val  is not None else "N/A",
+        f"{plus_di:.1f}"  if plus_di  is not None else "N/A",
+        f"{minus_di:.1f}" if minus_di is not None else "N/A",
     )
 
     signals = find_entry_signals(
@@ -893,7 +857,8 @@ async def analyze_pair(
     # 4. Сохраняем отчёт в БД (без авто-отправки — доступен по кнопке монеты)
     portfolio.save_report(pair, fmt_analysis(
         pair, TIMEFRAME, current_price, levels, signals,
-        htf_trend=htf_trend, htf_ema=htf_ema, adx=round(adx_val, 1),
+        htf_trend=htf_trend, htf_ema=htf_ema,
+        adx=round(adx_val, 1) if adx_val is not None else None,
     ))
 
     # 5. Ордера: всегда только для ближайшего уровня по направлению
