@@ -482,36 +482,25 @@ def _find_pump_high(df: pd.DataFrame, lookback: int = 20) -> float:
     return float(df["high"].iloc[-lookback:].max())
 
 
-def _calc_htf_trend(client, pair: str):
-    """Фетчит HTF-свечи, возвращает ('UP'/'DOWN'/None, ema_val/None)."""
+def _fetch_htf_confluence(client, pair: str):
+    """Один запрос 4h → (trend, ema, sr_levels). Тренд + S/R без двойного API-вызова."""
     try:
-        needed = HTF_EMA_PERIOD + 30
+        needed = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
         raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=needed)
         if not raw or len(raw) < HTF_EMA_PERIOD:
-            return None, None
+            return None, None, []
         closes = pd.Series([float(r[4]) for r in raw])
         ema    = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
         trend  = "UP" if float(raw[-1][4]) > ema else "DOWN"
-        return trend, round(ema, 8)
+        htf_sr: List[Dict] = []
+        if HTF_SR_CANDLES > 0 and len(raw) >= EXTREMA_WINDOW * 2 + 1:
+            df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
+            htf_sr = find_support_resistance(df_htf)
+        return trend, round(ema, 8), htf_sr
     except Exception as exc:
-        logger.warning("Ошибка HTF тренда %s: %s", pair, exc)
-        return None, None
-
-
-def _fetch_htf_sr_levels(client, pair: str) -> List[Dict]:
-    """Уровни S/R на старшем таймфрейме для подтверждения конфлюэнса."""
-    if HTF_SR_CANDLES <= 0:
-        return []
-    try:
-        raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=HTF_SR_CANDLES)
-        if not raw or len(raw) < EXTREMA_WINDOW * 2 + 1:
-            return []
-        df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
-        return find_support_resistance(df_htf)
-    except Exception as exc:
-        logger.warning("Ошибка загрузки HTF S/R %s: %s", pair, exc)
-        return []
+        logger.warning("Ошибка HTF анализа %s: %s", pair, exc)
+        return None, None, []
 
 
 def _mark_htf_confirmed(levels: List[Dict], htf_levels: List[Dict], tolerance_pct: float) -> None:
@@ -1094,13 +1083,10 @@ async def analyze_pair(
     # 3. Уровни и сигналы
     levels = find_support_resistance(df)
 
-    # HTF S/R подтверждение — метим уровни до генерации сигналов
-    htf_sr = _fetch_htf_sr_levels(client, pair)
+    # HTF: тренд + S/R — один API-запрос на пару
+    htf_trend, htf_ema, htf_sr = _fetch_htf_confluence(client, pair)
     if htf_sr:
         _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
-
-    # HTF тренд (4h) + ADX на рабочем TF
-    htf_trend, htf_ema = _calc_htf_trend(client, pair)
     adx_val, _, _ = _calc_adx(df, ADX_PERIOD)
 
     # RSI + ATR-ratio → режим рынка

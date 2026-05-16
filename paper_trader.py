@@ -364,19 +364,16 @@ class PaperPortfolio:
             logger.info("Лимит позиций (%d) достигнут.", self.max_open_trades)
             return None
 
-        if self.fixed_risk_mode:
-            sl_pct = abs(entry_price - sl) / entry_price
-            if sl_pct > 0 and self.leverage > 0:
-                risk_amount = self.balance * self.risk_per_trade_percent / 100.0
-                size_usd = risk_amount / (sl_pct * self.leverage)
-                size_usd = min(size_usd, self.balance * self.max_trade_size_percent / 100.0)
-            else:
-                size_usd = self.balance * self.trade_size_percent / 100.0
+        sl_pct = abs(entry_price - sl) / entry_price
+        if self.fixed_risk_mode and sl_pct > 0 and self.leverage > 0:
+            risk_amount = self.balance * self.risk_per_trade_percent / 100.0
+            size_usd = risk_amount / (sl_pct * self.leverage)
+            size_usd = min(size_usd, self.balance * self.max_trade_size_percent / 100.0)
         else:
             size_usd = self.balance * self.trade_size_percent / 100.0
         size_usd = round(min(size_usd, self.balance), 2)
         notional   = round(size_usd * self.leverage, 2)
-        risk_pct   = round(abs(entry_price - sl) / entry_price * 100, 2)
+        risk_pct   = round(sl_pct * 100, 2)
         reward_pct = round(abs(tp - entry_price) / entry_price * 100, 2)
         rr         = round(reward_pct / risk_pct, 1) if risk_pct > 0 else None
 
@@ -417,13 +414,11 @@ class PaperPortfolio:
         cancelled: List[Dict] = []
         remaining: List[Dict] = []
 
-        pair_had_orders = False
         for order in self.pending_orders:
             if order["pair"] != pair:
                 remaining.append(order)
                 continue
 
-            pair_had_orders = True
             order["checks_remaining"] -= 1
             hit = (
                 (order["direction"] == "LONG"  and candle_low  <= order["entry_price"]) or
