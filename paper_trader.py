@@ -31,7 +31,8 @@ _TRADE_HEADERS = [
     "id", "pair", "direction", "entry_price", "sl", "tp",
     "size_usd", "notional", "leverage", "risk_pct", "reward_pct", "rr",
     "opened_at", "closed_at", "close_price", "close_reason",
-    "pnl_usd", "pnl_percent", "commission", "sl_at_breakeven", "status",
+    "pnl_usd", "pnl_percent", "commission", "sl_at_breakeven",
+    "trail_dist", "peak_price", "status",
 ]
 
 try:
@@ -59,6 +60,8 @@ class PaperPortfolio:
         fixed_risk_mode: bool = True,
         risk_per_trade_percent: float = 1.0,
         max_trade_size_percent: float = 20.0,
+        trailing_stop: bool = False,
+        trailing_mult: float = 1.0,
     ):
         self.initial_balance        = initial_balance
         self.trade_size_percent     = trade_size_percent
@@ -70,6 +73,8 @@ class PaperPortfolio:
         self.fixed_risk_mode        = fixed_risk_mode
         self.risk_per_trade_percent = risk_per_trade_percent
         self.max_trade_size_percent = max_trade_size_percent
+        self.trailing_stop          = trailing_stop
+        self.trailing_mult          = trailing_mult
 
         self.balance: float             = initial_balance
         self.trades: List[Dict]         = []
@@ -194,7 +199,8 @@ class PaperPortfolio:
             for r in trade_rows:
                 t = {k: (None if v == "" else v) for k, v in r.items()}
                 for f in ("entry_price", "sl", "tp", "size_usd", "notional",
-                          "risk_pct", "reward_pct", "rr", "pnl_usd", "pnl_percent"):
+                          "risk_pct", "reward_pct", "rr", "pnl_usd", "pnl_percent",
+                          "trail_dist", "peak_price"):
                     if t.get(f) is not None:
                         try:
                             t[f] = float(t[f])
@@ -377,6 +383,10 @@ class PaperPortfolio:
         reward_pct = round(abs(tp - entry_price) / entry_price * 100, 2)
         rr         = round(reward_pct / risk_pct, 1) if risk_pct > 0 else None
 
+        trail_dist = (
+            round(abs(entry_price - sl) * self.trailing_mult, 8)
+            if self.trailing_stop else 0.0
+        )
         order: Dict = {
             "id":               str(uuid.uuid4())[:8].upper(),
             "pair":             pair,
@@ -390,6 +400,7 @@ class PaperPortfolio:
             "risk_pct":         risk_pct,
             "reward_pct":       reward_pct,
             "rr":               rr,
+            "trail_dist":       trail_dist,
             "created_at":       _utcnow(),
             "checks_remaining": self.pending_expiry_checks,
         }
@@ -478,6 +489,8 @@ class PaperPortfolio:
             "pnl_percent":     None,
             "commission":      None,
             "sl_at_breakeven": False,
+            "trail_dist":      order.get("trail_dist", 0.0),
+            "peak_price":      order["entry_price"],
             "status":          "OPEN",
         }
 
@@ -523,6 +536,54 @@ class PaperPortfolio:
                     logger.info(
                         "BE #%s %s %s: SL перенесён → %.6f",
                         trade["id"], trade["direction"], trade["pair"], entry,
+                    )
+        if moved:
+            self._save()
+        return moved
+
+    # ── Trailing stop ─────────────────────────────────────────────────────────
+
+    def check_trailing_stop(
+        self,
+        pair: str,
+        candle_high: float,
+        candle_low: float,
+    ) -> List[Dict]:
+        """Поджимает SL вслед за пиковой ценой. SL никогда не опускается ниже текущего."""
+        moved = []
+        for trade in self.open_trades:
+            if trade["pair"] != pair:
+                continue
+            trail = trade.get("trail_dist") or 0.0
+            if not trail:
+                continue
+            entry    = trade["entry_price"]
+            peak     = trade.get("peak_price") or entry
+            if trade["direction"] == "LONG":
+                new_peak = max(peak, candle_high)
+                new_sl   = new_peak - trail
+                if new_sl > trade["sl"]:
+                    trade["peak_price"] = new_peak
+                    trade["sl"]         = round(new_sl, 8)
+                    self._trades_dirty  = True
+                    moved.append(trade)
+                    logger.info(
+                        "Trail #%s %s %s: peak=%.6f → SL=%.6f",
+                        trade["id"], trade["direction"], trade["pair"],
+                        new_peak, trade["sl"],
+                    )
+            else:
+                new_peak = min(peak, candle_low)
+                new_sl   = new_peak + trail
+                if new_sl < trade["sl"]:
+                    trade["peak_price"] = new_peak
+                    trade["sl"]         = round(new_sl, 8)
+                    self._trades_dirty  = True
+                    moved.append(trade)
+                    logger.info(
+                        "Trail #%s %s %s: peak=%.6f → SL=%.6f",
+                        trade["id"], trade["direction"], trade["pair"],
+                        new_peak, trade["sl"],
                     )
         if moved:
             self._save()

@@ -48,7 +48,7 @@ from paper_trader import PaperPortfolio
 # ============================================================
 # ВЕРСИЯ
 # ============================================================
-BOT_VERSION = "1.4.0"
+BOT_VERSION = "1.5.0"
 
 # ============================================================
 # КОНФИГУРАЦИЯ
@@ -125,6 +125,11 @@ COMMISSION_RATE           = float(os.getenv("COMMISSION_RATE", "0.001"))
 # Доля пути к TP для переноса SL в безубыток (0.5 = 50%)
 BREAKEVEN_THRESHOLD       = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
 
+# --- Трейлинг-стоп ---
+# true = SL поджимается за ценой; trail_dist = оригинальный SL-дистанс × TRAILING_MULT
+TRAILING_STOP  = os.getenv("TRAILING_STOP",  "true").lower() == "true"
+TRAILING_MULT  = float(os.getenv("TRAILING_MULT",  "1.0"))
+
 # --- Подтверждение отскока ---
 # true = вход только если цена закрылась с нужной стороны уровня (закрытие > entry для LONG и т.д.)
 BOUNCE_CONFIRM            = os.getenv("BOUNCE_CONFIRM", "true").lower() == "true"
@@ -175,6 +180,8 @@ portfolio = PaperPortfolio(
     fixed_risk_mode=FIXED_RISK_MODE,
     risk_per_trade_percent=RISK_PER_TRADE_PERCENT,
     max_trade_size_percent=MAX_TRADE_SIZE_PERCENT,
+    trailing_stop=TRAILING_STOP,
+    trailing_mult=TRAILING_MULT,
 )
 
 
@@ -980,12 +987,12 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
         else:
             pnl_line = ""
         ep = t["entry_price"]
-        # Всегда пересчитываем от текущего SL — важно после переноса в безубыток
         sl_pct = round(abs(ep - t["sl"]) / ep * 100, 2) if ep else "?"
         tp_pct = round(abs(t["tp"] - ep) / ep * 100, 2) if ep else "?"
-        be_mark = " 🔒" if t.get("sl_at_breakeven") else ""
+        be_mark    = " 🔒" if t.get("sl_at_breakeven") else ""
+        trail_mark = " 🔄" if t.get("trail_dist") else ""
         lines.append(
-            f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}{be_mark}\n"
+            f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}{be_mark}{trail_mark}\n"
             f"   Вход: {_fp(ep)}\n"
             f"   SL: {_fp(t['sl'])}  (-{sl_pct}%)  •  TP: {_fp(t['tp'])}  (+{tp_pct}%)"
             f"{pnl_line}"
@@ -1064,9 +1071,10 @@ async def analyze_pair(
     h = max(h, current_price)
     l = min(l, current_price)
 
-    # 1. Безубыток → SL/TP для уже открытых сделок
+    # 1. Безубыток → трейлинг → SL/TP для уже открытых сделок
     for trade in portfolio.check_breakeven(pair, h, l):
         await send_msg(bot, fmt_sl_to_breakeven(trade))
+    portfolio.check_trailing_stop(pair, h, l)
     for trade in portfolio.check_sl_tp(pair, h, l):
         await send_msg(bot, fmt_trade_closed(trade, portfolio.get_equity()))
 
@@ -1077,6 +1085,7 @@ async def analyze_pair(
     # Та же свеча могла сразу достичь BE или SL/TP у только что открытых сделок
     for trade in portfolio.check_breakeven(pair, h, l):
         await send_msg(bot, fmt_sl_to_breakeven(trade))
+    portfolio.check_trailing_stop(pair, h, l)
     for closed in portfolio.check_sl_tp(pair, h, l):
         await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
 
@@ -1268,6 +1277,7 @@ async def fast_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             for trade in portfolio.check_breakeven(pair, h, l):
                 await send_msg(bot, fmt_sl_to_breakeven(trade))
+            portfolio.check_trailing_stop(pair, h, l)
 
             for closed in portfolio.check_sl_tp(pair, h, l):
                 await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
@@ -1278,6 +1288,7 @@ async def fast_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if triggered:
                 for trade in portfolio.check_breakeven(pair, h, l):
                     await send_msg(bot, fmt_sl_to_breakeven(trade))
+                portfolio.check_trailing_stop(pair, h, l)
                 for closed in portfolio.check_sl_tp(pair, h, l):
                     await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
 
@@ -1323,7 +1334,8 @@ async def post_init(app: Application) -> None:
         f"<b>{RISK_PER_TRADE_PERCENT if FIXED_RISK_MODE else TRADE_SIZE_PERCENT}%</b>  •  "
         f"Плечо: <b>{LEVERAGE}×</b>  •  Max: {MAX_OPEN_TRADES}\n"
         f"Комиссия: <b>{COMMISSION_RATE*100:.2f}%</b> round-trip  •  "
-        f"Безубыток при <b>{int(BREAKEVEN_THRESHOLD*100)}%</b> пути к TP  •  "
+        f"Безубыток при <b>{int(BREAKEVEN_THRESHOLD*100)}%</b> пути к TP\n"
+        f"Трейлинг: {'✓ ×' + str(TRAILING_MULT) if TRAILING_STOP else '✗'}  •  "
         f"Отскок: {'✓' if BOUNCE_CONFIRM else '✗'}\n"
         f"SL: ATR×{SL_ATR_MULT}  •  TP: ближ. уровень (мин ATR×{TP_ATR_MIN_MULT})  •  Min R:R 1:{MIN_RR}\n"
         f"ATR period: {ATR_PERIOD}  •  EMA{EMA_PERIOD}  •  Entry proximity: {ENTRY_PROXIMITY_PERCENT}%\n"
