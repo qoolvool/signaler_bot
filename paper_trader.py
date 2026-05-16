@@ -518,26 +518,30 @@ class PaperPortfolio:
             if trade["direction"] == "LONG":
                 target = entry + (tp - entry) * self.breakeven_threshold
                 if candle_high >= target:
-                    trade["sl"]              = entry
+                    new_sl = max(entry, trade["sl"])
                     trade["sl_at_breakeven"] = True
                     self._trades_dirty       = True
-                    moved.append(trade)
-                    logger.info(
-                        "BE #%s %s %s: SL перенесён → %.6f",
-                        trade["id"], trade["direction"], trade["pair"], entry,
-                    )
+                    if new_sl > trade["sl"]:
+                        trade["sl"] = new_sl
+                        moved.append(trade)
+                        logger.info(
+                            "BE #%s %s %s: SL перенесён → %.6f",
+                            trade["id"], trade["direction"], trade["pair"], new_sl,
+                        )
             else:
                 target = entry - (entry - tp) * self.breakeven_threshold
                 if candle_low <= target:
-                    trade["sl"]              = entry
+                    new_sl = min(entry, trade["sl"])
                     trade["sl_at_breakeven"] = True
                     self._trades_dirty       = True
-                    moved.append(trade)
-                    logger.info(
-                        "BE #%s %s %s: SL перенесён → %.6f",
-                        trade["id"], trade["direction"], trade["pair"], entry,
-                    )
-        if moved:
+                    if new_sl < trade["sl"]:
+                        trade["sl"] = new_sl
+                        moved.append(trade)
+                        logger.info(
+                            "BE #%s %s %s: SL перенесён → %.6f",
+                            trade["id"], trade["direction"], trade["pair"], new_sl,
+                        )
+        if self._trades_dirty:
             self._save()
         return moved
 
