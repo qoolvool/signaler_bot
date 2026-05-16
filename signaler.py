@@ -80,6 +80,10 @@ MIN_TOUCH_SPACING     = int(os.getenv("MIN_TOUCH_SPACING", "3"))
 LEVEL_AGE_MIN_CANDLES = int(os.getenv("LEVEL_AGE_MIN_CANDLES", "10"))
 VOLUME_TOUCH_MULTIPLIER = float(os.getenv("VOLUME_TOUCH_MULTIPLIER", "1.2"))
 REQUIRE_RETEST        = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
+# Окно свингов для определения структуры на HTF (меньше EXTREMA_WINDOW, чтобы ловить свежие пики)
+HTF_STRUCTURE_WINDOW   = int(os.getenv("HTF_STRUCTURE_WINDOW",   "5"))
+# true = сигнал в NORMAL-режиме только при RSI-дивергенции у уровня
+REQUIRE_RSI_DIVERGENCE = os.getenv("REQUIRE_RSI_DIVERGENCE", "true").lower() == "true"
 
 ENTRY_PROXIMITY_PERCENT = float(os.getenv("ENTRY_PROXIMITY_PERCENT", "0.5"))
 EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
@@ -489,25 +493,44 @@ def _find_pump_high(df: pd.DataFrame, lookback: int = 20) -> float:
     return float(df["high"].iloc[-lookback:].max())
 
 
+def _detect_htf_structure(raw: list, window: int = HTF_STRUCTURE_WINDOW) -> str:
+    """Структура HTF по последним двум свингам: BULLISH (HH+HL), BEARISH (LH+LL), RANGE."""
+    if not raw or len(raw) < window * 4 + 1:
+        return "RANGE"
+    df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    highs = _find_local_extrema(df["high"], window, "max")
+    lows  = _find_local_extrema(df["low"],  window, "min")
+    if len(highs) < 2 or len(lows) < 2:
+        return "RANGE"
+    h_prev, h_last = highs[-2][0], highs[-1][0]
+    l_prev, l_last = lows[-2][0],  lows[-1][0]
+    if h_last > h_prev and l_last > l_prev:
+        return "BULLISH"
+    if h_last < h_prev and l_last < l_prev:
+        return "BEARISH"
+    return "RANGE"
+
+
 def _fetch_htf_confluence(client, pair: str):
-    """Один запрос 4h → (trend, ema, sr_levels). Тренд + S/R без двойного API-вызова."""
+    """Один запрос 4h → (trend, ema, sr_levels, structure). Тренд + структура + S/R."""
     try:
         needed = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
         raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=needed)
         if not raw or len(raw) < HTF_EMA_PERIOD:
-            return None, None, []
+            return None, None, [], "RANGE"
         closes = pd.Series([float(r[4]) for r in raw])
         ema    = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
         trend  = "UP" if float(raw[-1][4]) > ema else "DOWN"
+        structure = _detect_htf_structure(raw)
         htf_sr: List[Dict] = []
         if HTF_SR_CANDLES > 0 and len(raw) >= EXTREMA_WINDOW * 2 + 1:
             df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
             htf_sr = find_support_resistance(df_htf)
-        return trend, round(ema, 8), htf_sr
+        return trend, round(ema, 8), htf_sr, structure
     except Exception as exc:
         logger.warning("Ошибка HTF анализа %s: %s", pair, exc)
-        return None, None, []
+        return None, None, [], "RANGE"
 
 
 def _mark_htf_confirmed(levels: List[Dict], htf_levels: List[Dict], tolerance_pct: float) -> None:
@@ -546,6 +569,45 @@ def _detect_candle_pattern(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
+def _detect_rsi_divergence(
+    df: pd.DataFrame,
+    rsi_series: pd.Series,
+    direction: str,
+    level_price: float,
+    window: int = EXTREMA_WINDOW,
+    proximity_pct: float = TOLERANCE_PERCENT,
+) -> bool:
+    """
+    Бычья дивергенция (LONG): цена делает LL у уровня поддержки, RSI — HL.
+    Медвежья (SHORT): цена делает HH у уровня сопротивления, RSI — LH.
+    Ищет свинги в зоне ±4× tolerance вокруг level_price.
+    """
+    tol = proximity_pct / 100.0 * 4
+    n   = len(rsi_series)
+    if direction == "LONG":
+        swings = _find_local_extrema(df["low"], window, "min")
+        near   = [(p, i) for p, i in swings if abs(p - level_price) / level_price <= tol]
+        if len(near) < 2:
+            return False
+        (p1, i1), (p2, i2) = near[-2], near[-1]
+        if p2 >= p1:
+            return False  # нет нового лоя → дивергенции нет
+        r1 = float(rsi_series.iloc[i1]) if i1 < n else 50.0
+        r2 = float(rsi_series.iloc[i2]) if i2 < n else 50.0
+        return r2 > r1  # RSI выше → бычья дивергенция
+    else:
+        swings = _find_local_extrema(df["high"], window, "max")
+        near   = [(p, i) for p, i in swings if abs(p - level_price) / level_price <= tol]
+        if len(near) < 2:
+            return False
+        (p1, i1), (p2, i2) = near[-2], near[-1]
+        if p2 <= p1:
+            return False  # нет нового хая → дивергенции нет
+        r1 = float(rsi_series.iloc[i1]) if i1 < n else 50.0
+        r2 = float(rsi_series.iloc[i2]) if i2 < n else 50.0
+        return r2 < r1  # RSI ниже → медвежья дивергенция
+
+
 def find_entry_signals(
     df: pd.DataFrame,
     levels: List[Dict],
@@ -562,6 +624,8 @@ def find_entry_signals(
     regime: str = "NORMAL",
     crash_low: Optional[float] = None,
     pump_high: Optional[float] = None,
+    htf_structure: Optional[str] = None,
+    rsi_series: Optional[pd.Series] = None,
 ) -> List[Dict]:
     # Во время паники (краш или памп) — не создавать новых ордеров
     if regime in ("CRASH", "PUMP"):
@@ -610,11 +674,24 @@ def find_entry_signals(
                 direction = "SHORT"
             else:
                 continue
-            if htf_trend is not None:
-                if htf_trend != ("UP" if direction == "LONG" else "DOWN"):
+            # HTF структура заменяет бинарный EMA-тренд как фильтр направления
+            if htf_structure is not None:
+                if htf_structure == "RANGE":
+                    continue
+                if htf_structure != ("BULLISH" if direction == "LONG" else "BEARISH"):
                     continue
 
         entry = lvl["price"]
+
+        # RSI-дивергенция — триггер подтверждения разворота (только NORMAL-режим)
+        divergence = False
+        if rsi_series is not None and not special:
+            divergence = _detect_rsi_divergence(df, rsi_series, direction, entry)
+            if REQUIRE_RSI_DIVERGENCE and not divergence:
+                continue
+        elif rsi_series is not None:
+            # спецрежим: считаем дивергенцию для отображения, но не блокируем
+            divergence = _detect_rsi_divergence(df, rsi_series, direction, entry)
 
         if recovery and crash_low is not None:
             sl      = crash_low * (1.0 - CRASH_SL_BUFFER / 100.0)
@@ -690,6 +767,7 @@ def find_entry_signals(
             "ema":              ema_val,
             "ema_trend":        ema_trend,
             "htf_trend":        htf_trend,
+            "htf_structure":    htf_structure,
             "adx":              round(adx_val, 1) if adx_val is not None else None,
             "atr":              round(atr, 8),
             "distance_percent": round(distance * 100, 2),
@@ -699,6 +777,7 @@ def find_entry_signals(
             "risk_pct":         risk_pct,
             "reward_pct":       reward_pct,
             "regime":           regime,
+            "divergence":       divergence,
         })
     return signals
 
@@ -770,6 +849,7 @@ def fmt_analysis(
     rsi: Optional[float] = None,
     atr_ratio: Optional[float] = None,
     regime: str = "NORMAL",
+    htf_structure: Optional[str] = None,
 ) -> str:
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     lines = [
@@ -777,19 +857,23 @@ def fmt_analysis(
         f"💰 Цена: <b>{_fp(current_price)}</b>",
         f"🕒 {now}",
     ]
-    # Шапка: HTF тренд + ADX
+    # Шапка: HTF тренд + структура + ADX
     htf_str = ""
     if htf_trend:
         ht = "↑ UP" if htf_trend == "UP" else "↓ DOWN"
         htf_str = f"  •  {HTF_TIMEFRAME} EMA{HTF_EMA_PERIOD}: <b>{ht}</b>"
         if htf_ema:
             htf_str += f" ({_fp(htf_ema)})"
+    struct_str = ""
+    if htf_structure:
+        struct_map = {"BULLISH": "HH/HL ↑", "BEARISH": "LH/LL ↓", "RANGE": "↔ боковик"}
+        struct_str = f"  •  Структура: <b>{struct_map.get(htf_structure, htf_structure)}</b>"
     adx_str = ""
     if adx is not None:
         label = "тренд" if adx >= ADX_MIN else "боковик"
         adx_str = f"  •  ADX: <b>{adx:.1f}</b> ({label})"
-    if htf_str or adx_str:
-        lines.append(f"📡{htf_str}{adx_str}")
+    if htf_str or struct_str or adx_str:
+        lines.append(f"📡{htf_str}{struct_str}{adx_str}")
     # RSI + ATR-ratio + режим рынка
     rsi_str = ""
     if rsi is not None:
@@ -832,8 +916,9 @@ def fmt_analysis(
                 ta_htf = f"  •  {HTF_TIMEFRAME}:{ta_htf}"
             adx_s = f"  •  ADX:{sig['adx']}" if sig.get("adx") is not None else ""
             htf_mark = " ✨" if lvl.get("htf_confirmed") else ""
+            div_mark = " 📊" if sig.get("divergence") else ""
             lines.append(
-                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}{htf_mark}"
+                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}{htf_mark}{div_mark}"
                 f"  <i>({sig['distance_percent']}%)</i>"
             )
             lines.append(
@@ -1092,8 +1177,8 @@ async def analyze_pair(
     # 3. Уровни и сигналы
     levels = find_support_resistance(df)
 
-    # HTF: тренд + S/R — один API-запрос на пару
-    htf_trend, htf_ema, htf_sr = _fetch_htf_confluence(client, pair)
+    # HTF: тренд + структура + S/R — один API-запрос на пару
+    htf_trend, htf_ema, htf_sr, htf_structure = _fetch_htf_confluence(client, pair)
     if htf_sr:
         _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
     adx_val, _, _ = _calc_adx(df, ADX_PERIOD)
@@ -1108,8 +1193,9 @@ async def analyze_pair(
     pump_high  = _find_pump_high(df, PUMP_HIGH_LOOKBACK)  if regime == "CORRECTION" else None
 
     logger.info(
-        "%s | HTF(%s)=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
+        "%s | HTF(%s)=%s  структура=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
         pair, HTF_TIMEFRAME, htf_trend or "N/A",
+        htf_structure or "N/A",
         f"{adx_val:.1f}" if adx_val is not None else "N/A",
         rsi_val, atr_ratio, regime,
     )
@@ -1126,6 +1212,8 @@ async def analyze_pair(
         regime=regime,
         crash_low=crash_low,
         pump_high=pump_high,
+        htf_structure=htf_structure,
+        rsi_series=rsi_series,
     )
 
     # 4. Сохраняем отчёт в БД (без авто-отправки — доступен по кнопке монеты)
@@ -1136,6 +1224,7 @@ async def analyze_pair(
         rsi=round(rsi_val, 1),
         atr_ratio=atr_ratio,
         regime=regime,
+        htf_structure=htf_structure,
     ))
 
     # 5. Ордера: всегда только для ближайшего уровня по направлению
