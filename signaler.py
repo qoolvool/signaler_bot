@@ -48,7 +48,7 @@ from paper_trader import PaperPortfolio
 # ============================================================
 # ВЕРСИЯ
 # ============================================================
-BOT_VERSION = "1.3.0"
+BOT_VERSION = "1.5.0"
 
 # ============================================================
 # КОНФИГУРАЦИЯ
@@ -125,6 +125,27 @@ COMMISSION_RATE           = float(os.getenv("COMMISSION_RATE", "0.001"))
 # Доля пути к TP для переноса SL в безубыток (0.5 = 50%)
 BREAKEVEN_THRESHOLD       = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
 
+# --- Трейлинг-стоп ---
+# true = SL поджимается за ценой; trail_dist = оригинальный SL-дистанс × TRAILING_MULT
+TRAILING_STOP  = os.getenv("TRAILING_STOP",  "true").lower() == "true"
+TRAILING_MULT  = float(os.getenv("TRAILING_MULT",  "1.0"))
+
+# --- Подтверждение отскока ---
+# true = вход только если цена закрылась с нужной стороны уровня (закрытие > entry для LONG и т.д.)
+BOUNCE_CONFIRM            = os.getenv("BOUNCE_CONFIRM", "true").lower() == "true"
+
+# --- Фиксированный риск на сделку ---
+# true = позиция рассчитывается так, чтобы потеря при SL = RISK_PER_TRADE_PERCENT% баланса
+FIXED_RISK_MODE           = os.getenv("FIXED_RISK_MODE", "true").lower() == "true"
+RISK_PER_TRADE_PERCENT    = float(os.getenv("RISK_PER_TRADE_PERCENT", "1.0"))
+MAX_TRADE_SIZE_PERCENT    = float(os.getenv("MAX_TRADE_SIZE_PERCENT", "20.0"))
+
+# --- HTF S/R подтверждение ---
+# Кол-во свечей HTF_TIMEFRAME для поиска уровней S/R (0 = отключить)
+HTF_SR_CANDLES            = int(os.getenv("HTF_SR_CANDLES", "200"))
+# true = сигналы только с HTF-подтверждением; false = предпочитать HTF, но не блокировать остальные
+HTF_SR_REQUIRE_CONFIRM    = os.getenv("HTF_SR_REQUIRE_CONFIRM", "false").lower() == "true"
+
 # --- Paper trading ---
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
 TRADE_SIZE_PERCENT     = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
@@ -156,6 +177,11 @@ portfolio = PaperPortfolio(
     leverage=LEVERAGE,
     commission_rate=COMMISSION_RATE,
     breakeven_threshold=BREAKEVEN_THRESHOLD,
+    fixed_risk_mode=FIXED_RISK_MODE,
+    risk_per_trade_percent=RISK_PER_TRADE_PERCENT,
+    max_trade_size_percent=MAX_TRADE_SIZE_PERCENT,
+    trailing_stop=TRAILING_STOP,
+    trailing_mult=TRAILING_MULT,
 )
 
 
@@ -463,20 +489,36 @@ def _find_pump_high(df: pd.DataFrame, lookback: int = 20) -> float:
     return float(df["high"].iloc[-lookback:].max())
 
 
-def _calc_htf_trend(client, pair: str):
-    """Фетчит HTF-свечи, возвращает ('UP'/'DOWN'/None, ema_val/None)."""
+def _fetch_htf_confluence(client, pair: str):
+    """Один запрос 4h → (trend, ema, sr_levels). Тренд + S/R без двойного API-вызова."""
     try:
-        needed = HTF_EMA_PERIOD + 30
+        needed = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
         raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=needed)
         if not raw or len(raw) < HTF_EMA_PERIOD:
-            return None, None
+            return None, None, []
         closes = pd.Series([float(r[4]) for r in raw])
         ema    = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
         trend  = "UP" if float(raw[-1][4]) > ema else "DOWN"
-        return trend, round(ema, 8)
+        htf_sr: List[Dict] = []
+        if HTF_SR_CANDLES > 0 and len(raw) >= EXTREMA_WINDOW * 2 + 1:
+            df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
+            htf_sr = find_support_resistance(df_htf)
+        return trend, round(ema, 8), htf_sr
     except Exception as exc:
-        logger.warning("Ошибка HTF тренда %s: %s", pair, exc)
-        return None, None
+        logger.warning("Ошибка HTF анализа %s: %s", pair, exc)
+        return None, None, []
+
+
+def _mark_htf_confirmed(levels: List[Dict], htf_levels: List[Dict], tolerance_pct: float) -> None:
+    """Помечает htf_confirmed=True на уровнях, совпадающих с уровнем того же типа на HTF."""
+    tol = tolerance_pct / 100.0
+    for lvl in levels:
+        lvl["htf_confirmed"] = any(
+            h["type"] == lvl["type"]
+            and abs(h["price"] - lvl["price"]) / lvl["price"] <= tol
+            for h in htf_levels
+        )
 
 
 def _detect_candle_pattern(df: pd.DataFrame) -> Optional[str]:
@@ -789,8 +831,9 @@ def fmt_analysis(
                 ta_htf = "↑" if sig["htf_trend"] == "UP" else "↓"
                 ta_htf = f"  •  {HTF_TIMEFRAME}:{ta_htf}"
             adx_s = f"  •  ADX:{sig['adx']}" if sig.get("adx") is not None else ""
+            htf_mark = " ✨" if lvl.get("htf_confirmed") else ""
             lines.append(
-                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}"
+                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}{htf_mark}"
                 f"  <i>({sig['distance_percent']}%)</i>"
             )
             lines.append(
@@ -818,10 +861,11 @@ def fmt_analysis(
         ru_type = "Сопр." if lvl["type"] == "RESISTANCE" else "Подд."
         dist    = (lvl["price"] - current_price) / current_price * 100
         sign    = "+" if dist >= 0 else ""
-        retest  = " ✅" if lvl.get("has_retest") else ""
+        retest   = " ✅" if lvl.get("has_retest") else ""
+        htf_mark = " ✨" if lvl.get("htf_confirmed") else ""
         lines.append(
             f"{emoji} <b>{_fp(lvl['price'])}</b> — {ru_type} "
-            f"(касаний: <b>{lvl['touches']}</b>, {sign}{dist:.2f}%{retest})"
+            f"(касаний: <b>{lvl['touches']}</b>, {sign}{dist:.2f}%{retest}{htf_mark})"
         )
     return "\n".join(lines)
 
@@ -943,12 +987,12 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
         else:
             pnl_line = ""
         ep = t["entry_price"]
-        # Всегда пересчитываем от текущего SL — важно после переноса в безубыток
         sl_pct = round(abs(ep - t["sl"]) / ep * 100, 2) if ep else "?"
         tp_pct = round(abs(t["tp"] - ep) / ep * 100, 2) if ep else "?"
-        be_mark = " 🔒" if t.get("sl_at_breakeven") else ""
+        be_mark    = " 🔒" if t.get("sl_at_breakeven") else ""
+        trail_mark = " 🔄" if t.get("trail_dist") else ""
         lines.append(
-            f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}{be_mark}\n"
+            f"{de} <b>#{t['id']}</b> {t['pair']}  •  {t['direction']}{be_mark}{trail_mark}\n"
             f"   Вход: {_fp(ep)}\n"
             f"   SL: {_fp(t['sl'])}  (-{sl_pct}%)  •  TP: {_fp(t['tp'])}  (+{tp_pct}%)"
             f"{pnl_line}"
@@ -1027,25 +1071,31 @@ async def analyze_pair(
     h = max(h, current_price)
     l = min(l, current_price)
 
-    # 1. Безубыток → SL/TP для уже открытых сделок
+    # 1. Безубыток → трейлинг → SL/TP для уже открытых сделок
     for trade in portfolio.check_breakeven(pair, h, l):
         await send_msg(bot, fmt_sl_to_breakeven(trade))
+    portfolio.check_trailing_stop(pair, h, l)
     for trade in portfolio.check_sl_tp(pair, h, l):
         await send_msg(bot, fmt_trade_closed(trade, portfolio.get_equity()))
 
     # 2. Проверка ожидающих ордеров — коснулась ли цена уровня
-    triggered, _ = portfolio.check_pending_orders(pair, h, l)
+    triggered, _ = portfolio.check_pending_orders(pair, h, l,
+                                                   candle_close=current_price,
+                                                   require_bounce=BOUNCE_CONFIRM)
     # Та же свеча могла сразу достичь BE или SL/TP у только что открытых сделок
     for trade in portfolio.check_breakeven(pair, h, l):
         await send_msg(bot, fmt_sl_to_breakeven(trade))
+    portfolio.check_trailing_stop(pair, h, l)
     for closed in portfolio.check_sl_tp(pair, h, l):
         await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
 
     # 3. Уровни и сигналы
     levels = find_support_resistance(df)
 
-    # HTF тренд (4h) + ADX на рабочем TF
-    htf_trend, htf_ema = _calc_htf_trend(client, pair)
+    # HTF: тренд + S/R — один API-запрос на пару
+    htf_trend, htf_ema, htf_sr = _fetch_htf_confluence(client, pair)
+    if htf_sr:
+        _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
     adx_val, _, _ = _calc_adx(df, ADX_PERIOD)
 
     # RSI + ATR-ratio → режим рынка
@@ -1064,8 +1114,13 @@ async def analyze_pair(
         rsi_val, atr_ratio, regime,
     )
 
+    signal_levels = (
+        [l for l in levels if l.get("htf_confirmed")]
+        if HTF_SR_REQUIRE_CONFIRM and htf_sr
+        else levels
+    )
     signals = find_entry_signals(
-        df, levels, current_price,
+        df, signal_levels, current_price,
         htf_trend=htf_trend,
         adx_val=adx_val,
         regime=regime,
@@ -1085,7 +1140,7 @@ async def analyze_pair(
 
     # 5. Ордера: всегда только для ближайшего уровня по направлению
     best: Dict[str, Optional[Dict]] = {"LONG": None, "SHORT": None}
-    for sig in sorted(signals, key=lambda s: s["distance_percent"]):
+    for sig in sorted(signals, key=lambda s: (not s["level"].get("htf_confirmed", False), s["distance_percent"])):
         if best[sig["direction"]] is None:
             best[sig["direction"]] = sig
 
@@ -1222,14 +1277,18 @@ async def fast_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             for trade in portfolio.check_breakeven(pair, h, l):
                 await send_msg(bot, fmt_sl_to_breakeven(trade))
+            portfolio.check_trailing_stop(pair, h, l)
 
             for closed in portfolio.check_sl_tp(pair, h, l):
                 await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
 
-            triggered, _ = portfolio.check_pending_orders(pair, h, l)
+            triggered, _ = portfolio.check_pending_orders(pair, h, l,
+                                                           candle_close=current_price,
+                                                           require_bounce=BOUNCE_CONFIRM)
             if triggered:
                 for trade in portfolio.check_breakeven(pair, h, l):
                     await send_msg(bot, fmt_sl_to_breakeven(trade))
+                portfolio.check_trailing_stop(pair, h, l)
                 for closed in portfolio.check_sl_tp(pair, h, l):
                     await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
 
@@ -1271,12 +1330,18 @@ async def post_init(app: Application) -> None:
         f"Режим: анализ каждые <b>{mode}</b>  •  SL/TP каждые <b>{SL_TP_CHECK_INTERVAL_MIN} мин</b>\n\n"
         f"💰 Equity: <b>${portfolio.get_equity():,.2f}</b>  "
         f"(из ${portfolio.initial_balance:,.2f})\n"
-        f"Маржа на сделку: {TRADE_SIZE_PERCENT}%  •  Плечо: <b>{LEVERAGE}×</b>  •  Max: {MAX_OPEN_TRADES}\n"
+        f"{'Риск' if FIXED_RISK_MODE else 'Маржа'}/сделку: "
+        f"<b>{RISK_PER_TRADE_PERCENT if FIXED_RISK_MODE else TRADE_SIZE_PERCENT}%</b>  •  "
+        f"Плечо: <b>{LEVERAGE}×</b>  •  Max: {MAX_OPEN_TRADES}\n"
         f"Комиссия: <b>{COMMISSION_RATE*100:.2f}%</b> round-trip  •  "
         f"Безубыток при <b>{int(BREAKEVEN_THRESHOLD*100)}%</b> пути к TP\n"
+        f"Трейлинг: {'✓ ×' + str(TRAILING_MULT) if TRAILING_STOP else '✗'}  •  "
+        f"Отскок: {'✓' if BOUNCE_CONFIRM else '✗'}\n"
         f"SL: ATR×{SL_ATR_MULT}  •  TP: ближ. уровень (мин ATR×{TP_ATR_MIN_MULT})  •  Min R:R 1:{MIN_RR}\n"
         f"ATR period: {ATR_PERIOD}  •  EMA{EMA_PERIOD}  •  Entry proximity: {ENTRY_PROXIMITY_PERCENT}%\n"
-        f"Тренд-фильтры: {HTF_TIMEFRAME} EMA{HTF_EMA_PERIOD}  •  ADX≥{ADX_MIN} (period {ADX_PERIOD})\n\n"
+        f"Тренд-фильтры: {HTF_TIMEFRAME} EMA{HTF_EMA_PERIOD}  •  ADX≥{ADX_MIN}  •  "
+        f"HTF S/R: {'✓' if HTF_SR_CANDLES > 0 else '✗'}"
+        f"{'  (только HTF)' if HTF_SR_REQUIRE_CONFIRM else ''}\n\n"
         f"Первый анализ через ~15 сек."
     )
     try:
