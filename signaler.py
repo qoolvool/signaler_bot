@@ -16,10 +16,11 @@ MEXC Support & Resistance Signaler + Paper Trader
 
 import asyncio
 import logging
+import math
 import os
 import sys
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional
 
 # load_dotenv MUST come before paper_trader import so DATA_DIR is applied to file paths
 try:
@@ -48,7 +49,7 @@ from paper_trader import PaperPortfolio
 # ============================================================
 # ВЕРСИЯ
 # ============================================================
-BOT_VERSION = "1.5.0"
+BOT_VERSION = "1.8.0"
 
 # ============================================================
 # КОНФИГУРАЦИЯ
@@ -61,10 +62,19 @@ TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "")
 
 TRADING_PAIRS = [
     p.strip() for p in os.getenv("TRADING_PAIRS", (
-        "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,"
-        "ADA/USDT,AVAX/USDT,DOT/USDT,ATOM/USDT,LINK/USDT,"
-        "LTC/USDT,NEAR/USDT,UNI/USDT,FIL/USDT,INJ/USDT,"
-        "RNDR/USDT,TON/USDT,SUI/USDT,ARB/USDT,OP/USDT"
+        # 12 пар из разных секторов — минимальная межсекторная корреляция
+        "BTC/USDT,"   # цифровое золото / benchmark
+        "ETH/USDT,"   # L1 / DeFi-база
+        "SOL/USDT,"   # high-perf L1
+        "XRP/USDT,"   # payments / регуляторный сектор
+        "BNB/USDT,"   # exchange token
+        "LINK/USDT,"  # oracle / инфраструктура
+        "ARB/USDT,"   # L2 экосистема Ethereum
+        "RNDR/USDT,"  # AI / GPU compute
+        "ATOM/USDT,"  # межсетевое взаимодействие
+        "TON/USDT,"   # мессенджер-экосистема
+        "SUI/USDT,"   # новый L1
+        "LTC/USDT"    # Bitcoin-proxy с отдельной динамикой
     )).split(",")
     if p.strip()
 ]
@@ -80,16 +90,20 @@ MIN_TOUCH_SPACING     = int(os.getenv("MIN_TOUCH_SPACING", "3"))
 LEVEL_AGE_MIN_CANDLES = int(os.getenv("LEVEL_AGE_MIN_CANDLES", "10"))
 VOLUME_TOUCH_MULTIPLIER = float(os.getenv("VOLUME_TOUCH_MULTIPLIER", "1.2"))
 REQUIRE_RETEST        = os.getenv("REQUIRE_RETEST", "false").lower() == "true"
+# Окно свингов для определения структуры на HTF (меньше EXTREMA_WINDOW, чтобы ловить свежие пики)
+HTF_STRUCTURE_WINDOW   = int(os.getenv("HTF_STRUCTURE_WINDOW",   "5"))
+# true = сигнал в NORMAL-режиме только при RSI-дивергенции у уровня
+REQUIRE_RSI_DIVERGENCE = os.getenv("REQUIRE_RSI_DIVERGENCE", "true").lower() == "true"
 
 ENTRY_PROXIMITY_PERCENT = float(os.getenv("ENTRY_PROXIMITY_PERCENT", "0.5"))
 EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
 AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "0"))
-ATR_PERIOD              = int(os.getenv("ATR_PERIOD",   "14"))   # период ATR
-SL_ATR_MULT             = float(os.getenv("SL_ATR_MULT",   "1.5"))  # SL = entry ± ATR × mult
+ATR_PERIOD              = int(os.getenv("ATR_PERIOD",   "14"))
+SL_ATR_MULT             = float(os.getenv("SL_ATR_MULT",   "2.0"))  # SL = entry ± ATR × mult; 2.0 фильтрует шум на 1h
 # TP_ATR_MIN_MULT должен быть >= SL_ATR_MULT × MIN_RR, иначе фоллбэк не пройдёт MIN_RR фильтр
-# По умолчанию: 1.5 × 1.5 = 2.25 → ставим 2.5 для небольшого запаса
-TP_ATR_MIN_MULT         = float(os.getenv("TP_ATR_MIN_MULT", "2.5"))  # TP не ближе ATR × mult
-MIN_RR                  = float(os.getenv("MIN_RR",         "1.5"))  # пропустить если R:R < этого
+# 2.0 × 2.0 = 4.0 → ставим 4.0
+TP_ATR_MIN_MULT         = float(os.getenv("TP_ATR_MIN_MULT", "4.0"))  # TP не ближе ATR × mult
+MIN_RR                  = float(os.getenv("MIN_RR",         "2.0"))  # пропустить если R:R < этого
 
 # --- Многотаймфреймовый тренд (HTF) + ADX ---
 HTF_TIMEFRAME  = os.getenv("HTF_TIMEFRAME",  "4h")   # старший TF для определения тренда
@@ -123,12 +137,12 @@ SL_TP_CHECK_INTERVAL_MIN  = int(os.getenv("SL_TP_CHECK_INTERVAL_MIN", "3"))
 # Комиссия round-trip (открытие + закрытие), MEXC maker ≈ 0.1%
 COMMISSION_RATE           = float(os.getenv("COMMISSION_RATE", "0.001"))
 # Доля пути к TP для переноса SL в безубыток (0.5 = 50%)
-BREAKEVEN_THRESHOLD       = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
+BREAKEVEN_THRESHOLD       = float(os.getenv("BREAKEVEN_THRESHOLD", "0.65"))
 
 # --- Трейлинг-стоп ---
 # true = SL поджимается за ценой; trail_dist = оригинальный SL-дистанс × TRAILING_MULT
 TRAILING_STOP  = os.getenv("TRAILING_STOP",  "true").lower() == "true"
-TRAILING_MULT  = float(os.getenv("TRAILING_MULT",  "1.0"))
+TRAILING_MULT  = float(os.getenv("TRAILING_MULT",  "1.2"))
 
 # --- Подтверждение отскока ---
 # true = вход только если цена закрылась с нужной стороны уровня (закрытие > entry для LONG и т.д.)
@@ -138,13 +152,33 @@ BOUNCE_CONFIRM            = os.getenv("BOUNCE_CONFIRM", "true").lower() == "true
 # true = позиция рассчитывается так, чтобы потеря при SL = RISK_PER_TRADE_PERCENT% баланса
 FIXED_RISK_MODE           = os.getenv("FIXED_RISK_MODE", "true").lower() == "true"
 RISK_PER_TRADE_PERCENT    = float(os.getenv("RISK_PER_TRADE_PERCENT", "1.0"))
-MAX_TRADE_SIZE_PERCENT    = float(os.getenv("MAX_TRADE_SIZE_PERCENT", "20.0"))
+MAX_TRADE_SIZE_PERCENT    = float(os.getenv("MAX_TRADE_SIZE_PERCENT", "10.0"))
 
 # --- HTF S/R подтверждение ---
 # Кол-во свечей HTF_TIMEFRAME для поиска уровней S/R (0 = отключить)
 HTF_SR_CANDLES            = int(os.getenv("HTF_SR_CANDLES", "200"))
 # true = сигналы только с HTF-подтверждением; false = предпочитать HTF, но не блокировать остальные
 HTF_SR_REQUIRE_CONFIRM    = os.getenv("HTF_SR_REQUIRE_CONFIRM", "false").lower() == "true"
+
+# --- Слой 2: конфлюенс зоны (EMA + FVG + круглые числа) ---
+# EMA-периоды, которые используются как динамические уровни (запятая-разделённые)
+EMA_CONFLUENCE_PERIODS    = [int(x.strip()) for x in os.getenv("EMA_CONFLUENCE_PERIODS", "21,50").split(",") if x.strip()]
+# Сколько последних свечей сканировать на FVG
+FVG_LOOKBACK              = int(os.getenv("FVG_LOOKBACK", "50"))
+# Минимальный разрыв FVG как % от цены (слишком мелкие игнорируются)
+FVG_MIN_GAP_PCT           = float(os.getenv("FVG_MIN_GAP_PCT", "0.1"))
+
+# --- Слой 3: триггер входа (паттерн + объём) ---
+# true = сигнал генерируется только при наличии разворотного паттерна в нужную сторону
+REQUIRE_PATTERN    = os.getenv("REQUIRE_PATTERN", "false").lower() == "true"
+# Объём сигнальной свечи должен быть ≥ avg × SIGNAL_VOLUME_MULT (0 = фильтр выключен)
+SIGNAL_VOLUME_MULT = float(os.getenv("SIGNAL_VOLUME_MULT", "0"))
+
+# --- Фильтр корреляции / Correlation filter ---
+# Количество последних свечей для расчёта корреляции доходностей
+CORR_LOOKBACK = int(os.getenv("CORR_LOOKBACK", "48"))
+# Максимальная допустимая корреляция с уже открытой позицией (0 = фильтр выключен)
+CORR_MAX      = float(os.getenv("CORR_MAX", "0.75"))
 
 # --- Paper trading ---
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
@@ -353,6 +387,89 @@ def remove_duplicates(levels: List[Dict], tolerance: float) -> List[Dict]:
     return unique
 
 
+# ---------------------------------------------------------------------------
+# Слой 2 — конфлюенс зоны: EMA + FVG + круглые числа
+# ---------------------------------------------------------------------------
+
+def _calc_ema_levels(df: pd.DataFrame, periods: List[int]) -> List[Dict]:
+    """EMA21/EMA50 (или другие периоды) как динамические уровни S/R."""
+    current = float(df["close"].iloc[-1])
+    lvls: List[Dict] = []
+    for period in periods:
+        if len(df) >= period:
+            val = float(_calc_ema(df["close"], period).iloc[-1])
+            lvls.append({
+                "price":   round(val, 8),
+                "type":    "SUPPORT" if current > val else "RESISTANCE",
+                "subtype": f"EMA{period}",
+            })
+    return lvls
+
+
+def _find_fvg_zones(
+    df: pd.DataFrame,
+    lookback: int = 50,
+    min_gap_pct: float = 0.1,
+) -> List[Dict]:
+    """3-свечные имбалансы (Fair Value Gap): bullish low[i] > high[i-2], bearish обратно."""
+    zones: List[Dict] = []
+    n     = len(df)
+    start = max(2, n - lookback)
+    high  = df["high"].to_numpy()
+    low   = df["low"].to_numpy()
+    for i in range(start, n):
+        h_prev2, l_prev2 = high[i - 2], low[i - 2]
+        h_curr,  l_curr  = high[i],     low[i]
+        if l_curr > h_prev2:
+            mid = (h_prev2 + l_curr) / 2
+            if (l_curr - h_prev2) / mid * 100 >= min_gap_pct:
+                zones.append({"type": "SUPPORT", "bottom": float(h_prev2), "top": float(l_curr),
+                               "price": float(mid), "age_candles": n - 1 - i})
+        elif h_curr < l_prev2:
+            mid = (h_curr + l_prev2) / 2
+            if (l_prev2 - h_curr) / mid * 100 >= min_gap_pct:
+                zones.append({"type": "RESISTANCE", "bottom": float(h_curr), "top": float(l_prev2),
+                               "price": float(mid), "age_candles": n - 1 - i})
+    return zones
+
+
+def _is_round_number(price: float, tol_pct: float = TOLERANCE_PERCENT) -> bool:
+    """True, если цена близка к круглому числу (1000, 500, 100, 50, …)."""
+    if price <= 0:
+        return False
+    tol = price * tol_pct / 100.0
+    mag = 10.0 ** math.floor(math.log10(price))
+    for step in (mag, mag / 2.0):
+        nearest = round(price / step) * step
+        if abs(price - nearest) <= tol:
+            return True
+    return False
+
+
+def _add_confluence_scores(
+    levels: List[Dict],
+    ema_lvls: List[Dict],
+    fvg_zones: List[Dict],
+    tolerance_pct: float = TOLERANCE_PERCENT,
+) -> None:
+    """Добавляет confluence_score и confluence_tags к каждому уровню S/R."""
+    tol = tolerance_pct / 100.0
+    for lvl in levels:
+        tags: List[str] = []
+        p = lvl["price"]
+        for ema in ema_lvls:
+            if ema["type"] == lvl["type"] and abs(ema["price"] - p) / p <= tol:
+                tags.append(ema["subtype"])
+        for fvg in fvg_zones:
+            if fvg["type"] == lvl["type"] and fvg["bottom"] <= p <= fvg["top"]:
+                tags.append("FVG")
+                break
+        if _is_round_number(p, tolerance_pct):
+            tags.append("🔢")
+        lvl["confluence_score"] = len(tags)
+        lvl["confluence_tags"]  = tags
+
+
 def find_support_resistance(
     df: pd.DataFrame,
     min_touches: int = MIN_TOUCHES,
@@ -489,25 +606,43 @@ def _find_pump_high(df: pd.DataFrame, lookback: int = 20) -> float:
     return float(df["high"].iloc[-lookback:].max())
 
 
+def _detect_htf_structure(df: pd.DataFrame, window: int = HTF_STRUCTURE_WINDOW) -> str:
+    """Структура HTF по последним двум свингам: BULLISH (HH+HL), BEARISH (LH+LL), RANGE."""
+    if df is None or len(df) < window * 4 + 1:
+        return "RANGE"
+    highs = _find_local_extrema(df["high"], window, "max")
+    lows  = _find_local_extrema(df["low"],  window, "min")
+    if len(highs) < 2 or len(lows) < 2:
+        return "RANGE"
+    h_prev, h_last = highs[-2][0], highs[-1][0]
+    l_prev, l_last = lows[-2][0],  lows[-1][0]
+    if h_last > h_prev and l_last > l_prev:
+        return "BULLISH"
+    if h_last < h_prev and l_last < l_prev:
+        return "BEARISH"
+    return "RANGE"
+
+
 def _fetch_htf_confluence(client, pair: str):
-    """Один запрос 4h → (trend, ema, sr_levels). Тренд + S/R без двойного API-вызова."""
+    """Один запрос 4h → (trend, ema, sr_levels, structure). Тренд + структура + S/R."""
     try:
         needed = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
         raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=needed)
         if not raw or len(raw) < HTF_EMA_PERIOD:
-            return None, None, []
-        closes = pd.Series([float(r[4]) for r in raw])
-        ema    = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
-        trend  = "UP" if float(raw[-1][4]) > ema else "DOWN"
+            return None, None, [], "RANGE"
+        df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
+        closes = df_htf["close"].astype(float)
+        ema       = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
+        trend     = "UP" if float(closes.iloc[-1]) > ema else "DOWN"
+        structure = _detect_htf_structure(df_htf)
         htf_sr: List[Dict] = []
-        if HTF_SR_CANDLES > 0 and len(raw) >= EXTREMA_WINDOW * 2 + 1:
-            df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
+        if HTF_SR_CANDLES > 0 and len(df_htf) >= EXTREMA_WINDOW * 2 + 1:
             htf_sr = find_support_resistance(df_htf)
-        return trend, round(ema, 8), htf_sr
+        return trend, round(ema, 8), htf_sr, structure
     except Exception as exc:
         logger.warning("Ошибка HTF анализа %s: %s", pair, exc)
-        return None, None, []
+        return None, None, [], "RANGE"
 
 
 def _mark_htf_confirmed(levels: List[Dict], htf_levels: List[Dict], tolerance_pct: float) -> None:
@@ -546,6 +681,63 @@ def _detect_candle_pattern(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
+# Должны совпадать со строками _detect_candle_pattern — при добавлении паттерна обновить оба множества
+_BULLISH_PATTERNS: FrozenSet[str] = frozenset({"молот 🔨", "бычье поглощение 🕯"})
+_BEARISH_PATTERNS: FrozenSet[str] = frozenset({"падающая звезда ⭐", "медвежье поглощение 🕯"})
+
+_returns_cache: Dict[str, pd.Series] = {}
+
+
+def _check_correlation(pair: str, open_pairs: List[str]) -> bool:
+    if not open_pairs or CORR_MAX <= 0:
+        return True
+    r1 = _returns_cache.get(pair)
+    if r1 is None:
+        return True
+    for op in open_pairs:
+        r2 = _returns_cache.get(op)
+        if r2 is None:
+            continue
+        combined = pd.concat([r1, r2], axis=1).dropna()
+        if len(combined) < 10:
+            continue
+        if abs(combined.iloc[:, 0].corr(combined.iloc[:, 1])) > CORR_MAX:
+            return False
+    return True
+
+
+def _detect_rsi_divergence(
+    df: pd.DataFrame,
+    rsi_series: pd.Series,
+    direction: str,
+    level_price: float,
+    window: int = EXTREMA_WINDOW,
+    proximity_pct: float = TOLERANCE_PERCENT,
+) -> bool:
+    """
+    Бычья дивергенция (LONG): цена делает LL у уровня поддержки, RSI — HL.
+    Медвежья (SHORT): цена делает HH у уровня сопротивления, RSI — LH.
+    Ищет свинги в зоне ±4×tolerance вокруг level_price — достаточно широко,
+    чтобы захватить все касания зоны, но не соседние уровни.
+    """
+    tol    = proximity_pct / 100.0 * 4
+    n      = len(rsi_series)
+    long   = direction == "LONG"
+    series = df["low"] if long else df["high"]
+    kind   = "min" if long else "max"
+    swings = _find_local_extrema(series, window, kind)
+    near   = [(p, i) for p, i in swings if abs(p - level_price) / level_price <= tol]
+    if len(near) < 2:
+        return False
+    (p1, i1), (p2, i2) = near[-2], near[-1]
+    price_extended = p2 < p1 if long else p2 > p1
+    if not price_extended:
+        return False
+    r1 = float(rsi_series.iloc[i1]) if i1 < n else 50.0
+    r2 = float(rsi_series.iloc[i2]) if i2 < n else 50.0
+    return r2 > r1 if long else r2 < r1
+
+
 def find_entry_signals(
     df: pd.DataFrame,
     levels: List[Dict],
@@ -562,6 +754,8 @@ def find_entry_signals(
     regime: str = "NORMAL",
     crash_low: Optional[float] = None,
     pump_high: Optional[float] = None,
+    htf_structure: Optional[str] = None,
+    rsi_series: Optional[pd.Series] = None,
 ) -> List[Dict]:
     # Во время паники (краш или памп) — не создавать новых ордеров
     if regime in ("CRASH", "PUMP"):
@@ -580,6 +774,15 @@ def find_entry_signals(
     if pd.isna(atr) or atr <= 0:
         logger.warning("ATR некорректен (%.6f) для %s — сигналы пропущены", atr, regime)
         return []
+
+    if SIGNAL_VOLUME_MULT > 0:
+        sig_vol   = float(df["volume"].iloc[-2])
+        avg_vol   = float(df["volume"].iloc[-51:-1].mean())
+        vol_ratio = round(sig_vol / avg_vol, 1) if avg_vol > 0 else None
+        vol_spike = vol_ratio is not None and vol_ratio >= SIGNAL_VOLUME_MULT
+    else:
+        vol_ratio = None
+        vol_spike = False
     recovery    = (regime == "RECOVERY")
     correction  = (regime == "CORRECTION")
     special     = recovery or correction  # оба режима отключают стандартные фильтры
@@ -610,11 +813,29 @@ def find_entry_signals(
                 direction = "SHORT"
             else:
                 continue
-            if htf_trend is not None:
-                if htf_trend != ("UP" if direction == "LONG" else "DOWN"):
+            # HTF структура заменяет бинарный EMA-тренд как фильтр направления
+            if htf_structure is not None:
+                if htf_structure == "RANGE":
+                    continue
+                if htf_structure != ("BULLISH" if direction == "LONG" else "BEARISH"):
                     continue
 
         entry = lvl["price"]
+
+        # RSI-дивергенция — триггер подтверждения разворота (только NORMAL-режим)
+        divergence = False
+        if rsi_series is not None:
+            divergence = _detect_rsi_divergence(df, rsi_series, direction, entry)
+            if not special and REQUIRE_RSI_DIVERGENCE and not divergence:
+                continue
+
+        expected_patterns = _BULLISH_PATTERNS if direction == "LONG" else _BEARISH_PATTERNS
+        pattern_confirmed = pattern in expected_patterns
+        if not special and REQUIRE_PATTERN and not pattern_confirmed:
+            continue
+
+        if not special and SIGNAL_VOLUME_MULT > 0 and not vol_spike:
+            continue
 
         if recovery and crash_low is not None:
             sl      = crash_low * (1.0 - CRASH_SL_BUFFER / 100.0)
@@ -690,6 +911,7 @@ def find_entry_signals(
             "ema":              ema_val,
             "ema_trend":        ema_trend,
             "htf_trend":        htf_trend,
+            "htf_structure":    htf_structure,
             "adx":              round(adx_val, 1) if adx_val is not None else None,
             "atr":              round(atr, 8),
             "distance_percent": round(distance * 100, 2),
@@ -699,6 +921,10 @@ def find_entry_signals(
             "risk_pct":         risk_pct,
             "reward_pct":       reward_pct,
             "regime":           regime,
+            "divergence":       divergence,
+            "pattern_confirmed": pattern_confirmed,
+            "vol_ratio":        vol_ratio,
+            "volume_spike":     vol_spike,
         })
     return signals
 
@@ -770,6 +996,7 @@ def fmt_analysis(
     rsi: Optional[float] = None,
     atr_ratio: Optional[float] = None,
     regime: str = "NORMAL",
+    htf_structure: Optional[str] = None,
 ) -> str:
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     lines = [
@@ -777,19 +1004,23 @@ def fmt_analysis(
         f"💰 Цена: <b>{_fp(current_price)}</b>",
         f"🕒 {now}",
     ]
-    # Шапка: HTF тренд + ADX
+    # Шапка: HTF тренд + структура + ADX
     htf_str = ""
     if htf_trend:
         ht = "↑ UP" if htf_trend == "UP" else "↓ DOWN"
         htf_str = f"  •  {HTF_TIMEFRAME} EMA{HTF_EMA_PERIOD}: <b>{ht}</b>"
         if htf_ema:
             htf_str += f" ({_fp(htf_ema)})"
+    struct_str = ""
+    if htf_structure:
+        struct_map = {"BULLISH": "HH/HL ↑", "BEARISH": "LH/LL ↓", "RANGE": "↔ боковик"}
+        struct_str = f"  •  Структура: <b>{struct_map.get(htf_structure, htf_structure)}</b>"
     adx_str = ""
     if adx is not None:
         label = "тренд" if adx >= ADX_MIN else "боковик"
         adx_str = f"  •  ADX: <b>{adx:.1f}</b> ({label})"
-    if htf_str or adx_str:
-        lines.append(f"📡{htf_str}{adx_str}")
+    if htf_str or struct_str or adx_str:
+        lines.append(f"📡{htf_str}{struct_str}{adx_str}")
     # RSI + ATR-ratio + режим рынка
     rsi_str = ""
     if rsi is not None:
@@ -831,17 +1062,30 @@ def fmt_analysis(
                 ta_htf = "↑" if sig["htf_trend"] == "UP" else "↓"
                 ta_htf = f"  •  {HTF_TIMEFRAME}:{ta_htf}"
             adx_s = f"  •  ADX:{sig['adx']}" if sig.get("adx") is not None else ""
-            htf_mark = " ✨" if lvl.get("htf_confirmed") else ""
+            htf_mark   = " ✨" if lvl.get("htf_confirmed") else ""
+            div_mark   = " 📊" if sig.get("divergence") else ""
+            patt_mark  = " 🕯" if sig.get("pattern_confirmed") else ""
+            vol_mark   = " ⚡" if sig.get("volume_spike") else ""
+            cf_tags    = lvl.get("confluence_tags", [])
+            cf_mark    = f" [{'+'.join(cf_tags)}]" if cf_tags else ""
             lines.append(
-                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}{htf_mark}"
+                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}"
+                f"{htf_mark}{div_mark}{patt_mark}{vol_mark}{cf_mark}"
                 f"  <i>({sig['distance_percent']}%)</i>"
             )
             lines.append(
                 f"   {ta_30} EMA{EMA_PERIOD}={_fp(sig['ema'])}{ta_htf}{adx_s}"
                 f"  •  ATR={_fp(sig['atr'])}"
             )
-            if sig["pattern"]:
-                lines.append(f"   Паттерн: {sig['pattern']}")
+            trig_parts = []
+            if sig.get("pattern"):
+                patt_str = f"🕯 {sig['pattern']}" if sig.get("pattern_confirmed") else sig["pattern"]
+                trig_parts.append(patt_str)
+            if sig.get("vol_ratio") is not None:
+                vol_str = f"⚡ объём ×{sig['vol_ratio']}" if sig.get("volume_spike") else f"объём ×{sig['vol_ratio']}"
+                trig_parts.append(vol_str)
+            if trig_parts:
+                lines.append(f"   Триггер: {'  •  '.join(trig_parts)}")
             rr_str = f"  •  R:R 1:{sig['rr']}" if sig["rr"] else ""
             lines.append(
                 f"   SL: <b>{_fp(sig['sl'])}</b> (-{sig['risk_pct']}%)"
@@ -863,9 +1107,11 @@ def fmt_analysis(
         sign    = "+" if dist >= 0 else ""
         retest   = " ✅" if lvl.get("has_retest") else ""
         htf_mark = " ✨" if lvl.get("htf_confirmed") else ""
+        cf_tags  = lvl.get("confluence_tags", [])
+        cf_mark  = f" [{'+'.join(cf_tags)}]" if cf_tags else ""
         lines.append(
             f"{emoji} <b>{_fp(lvl['price'])}</b> — {ru_type} "
-            f"(касаний: <b>{lvl['touches']}</b>, {sign}{dist:.2f}%{retest}{htf_mark})"
+            f"(касаний: <b>{lvl['touches']}</b>, {sign}{dist:.2f}%{retest}{htf_mark}{cf_mark})"
         )
     return "\n".join(lines)
 
@@ -1049,6 +1295,10 @@ async def analyze_pair(
         logger.warning("Пропускаем %s (нет данных)", pair)
         return
 
+    _returns_cache[pair] = (
+        df.set_index("timestamp")["close"].pct_change().dropna().tail(CORR_LOOKBACK)
+    )
+
     try:
         current_price = float(client.fetch_ticker(pair)["last"])
     except Exception:
@@ -1092,8 +1342,13 @@ async def analyze_pair(
     # 3. Уровни и сигналы
     levels = find_support_resistance(df)
 
-    # HTF: тренд + S/R — один API-запрос на пару
-    htf_trend, htf_ema, htf_sr = _fetch_htf_confluence(client, pair)
+    # Слой 2: конфлюенс зоны — EMA + FVG + круглые числа
+    ema_lvls  = _calc_ema_levels(df, EMA_CONFLUENCE_PERIODS)
+    fvg_zones = _find_fvg_zones(df, FVG_LOOKBACK, FVG_MIN_GAP_PCT)
+    _add_confluence_scores(levels, ema_lvls, fvg_zones, TOLERANCE_PERCENT)
+
+    # HTF: тренд + структура + S/R — один API-запрос на пару
+    htf_trend, htf_ema, htf_sr, htf_structure = _fetch_htf_confluence(client, pair)
     if htf_sr:
         _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
     adx_val, _, _ = _calc_adx(df, ADX_PERIOD)
@@ -1108,8 +1363,9 @@ async def analyze_pair(
     pump_high  = _find_pump_high(df, PUMP_HIGH_LOOKBACK)  if regime == "CORRECTION" else None
 
     logger.info(
-        "%s | HTF(%s)=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
+        "%s | HTF(%s)=%s  структура=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
         pair, HTF_TIMEFRAME, htf_trend or "N/A",
+        htf_structure or "N/A",
         f"{adx_val:.1f}" if adx_val is not None else "N/A",
         rsi_val, atr_ratio, regime,
     )
@@ -1126,6 +1382,8 @@ async def analyze_pair(
         regime=regime,
         crash_low=crash_low,
         pump_high=pump_high,
+        htf_structure=htf_structure,
+        rsi_series=rsi_series,
     )
 
     # 4. Сохраняем отчёт в БД (без авто-отправки — доступен по кнопке монеты)
@@ -1136,13 +1394,27 @@ async def analyze_pair(
         rsi=round(rsi_val, 1),
         atr_ratio=atr_ratio,
         regime=regime,
+        htf_structure=htf_structure,
     ))
 
     # 5. Ордера: всегда только для ближайшего уровня по направлению
     best: Dict[str, Optional[Dict]] = {"LONG": None, "SHORT": None}
-    for sig in sorted(signals, key=lambda s: (not s["level"].get("htf_confirmed", False), s["distance_percent"])):
+    for sig in sorted(signals, key=lambda s: (
+        not s["level"].get("htf_confirmed", False),
+        -s["level"].get("confluence_score", 0),
+        s["distance_percent"],
+    )):
         if best[sig["direction"]] is None:
             best[sig["direction"]] = sig
+
+    # Фильтр корреляции: не открывать ордера рядом с уже открытыми коррелирующими позициями
+    open_pairs = [t["pair"] for t in portfolio.open_trades if t["pair"] != pair]
+    if not _check_correlation(pair, open_pairs):
+        logger.info(
+            "Пропуск ордеров %s: высокая корреляция с открытыми позициями (>%.2f)",
+            pair, CORR_MAX,
+        )
+        best = {"LONG": None, "SHORT": None}
 
     # Отменяем ордера, у которых теперь не самый близкий уровень (молча)
     tolerance = TOLERANCE_PERCENT / 100
@@ -1305,6 +1577,8 @@ async def analysis_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     pairs = fetch_top_pairs(client, AUTO_TOP_PAIRS) if AUTO_TOP_PAIRS > 0 else TRADING_PAIRS
     context.bot_data["pairs"] = pairs
+    for stale in list(_returns_cache.keys() - set(pairs)):
+        del _returns_cache[stale]
     logger.info("=== Запуск анализа (%d пар) ===", len(pairs))
 
     for idx, pair in enumerate(pairs):
