@@ -89,12 +89,12 @@ REQUIRE_RSI_DIVERGENCE = os.getenv("REQUIRE_RSI_DIVERGENCE", "true").lower() == 
 ENTRY_PROXIMITY_PERCENT = float(os.getenv("ENTRY_PROXIMITY_PERCENT", "0.5"))
 EMA_PERIOD              = int(os.getenv("EMA_PERIOD", "200"))
 AUTO_TOP_PAIRS          = int(os.getenv("AUTO_TOP_PAIRS", "0"))
-ATR_PERIOD              = int(os.getenv("ATR_PERIOD",   "14"))   # период ATR
-SL_ATR_MULT             = float(os.getenv("SL_ATR_MULT",   "1.5"))  # SL = entry ± ATR × mult
+ATR_PERIOD              = int(os.getenv("ATR_PERIOD",   "14"))
+SL_ATR_MULT             = float(os.getenv("SL_ATR_MULT",   "2.0"))  # SL = entry ± ATR × mult; 2.0 фильтрует шум на 1h
 # TP_ATR_MIN_MULT должен быть >= SL_ATR_MULT × MIN_RR, иначе фоллбэк не пройдёт MIN_RR фильтр
-# По умолчанию: 1.5 × 1.5 = 2.25 → ставим 2.5 для небольшого запаса
-TP_ATR_MIN_MULT         = float(os.getenv("TP_ATR_MIN_MULT", "2.5"))  # TP не ближе ATR × mult
-MIN_RR                  = float(os.getenv("MIN_RR",         "1.5"))  # пропустить если R:R < этого
+# 2.0 × 2.0 = 4.0 → ставим 4.0
+TP_ATR_MIN_MULT         = float(os.getenv("TP_ATR_MIN_MULT", "4.0"))  # TP не ближе ATR × mult
+MIN_RR                  = float(os.getenv("MIN_RR",         "2.0"))  # пропустить если R:R < этого
 
 # --- Многотаймфреймовый тренд (HTF) + ADX ---
 HTF_TIMEFRAME  = os.getenv("HTF_TIMEFRAME",  "4h")   # старший TF для определения тренда
@@ -128,12 +128,12 @@ SL_TP_CHECK_INTERVAL_MIN  = int(os.getenv("SL_TP_CHECK_INTERVAL_MIN", "3"))
 # Комиссия round-trip (открытие + закрытие), MEXC maker ≈ 0.1%
 COMMISSION_RATE           = float(os.getenv("COMMISSION_RATE", "0.001"))
 # Доля пути к TP для переноса SL в безубыток (0.5 = 50%)
-BREAKEVEN_THRESHOLD       = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
+BREAKEVEN_THRESHOLD       = float(os.getenv("BREAKEVEN_THRESHOLD", "0.65"))
 
 # --- Трейлинг-стоп ---
 # true = SL поджимается за ценой; trail_dist = оригинальный SL-дистанс × TRAILING_MULT
 TRAILING_STOP  = os.getenv("TRAILING_STOP",  "true").lower() == "true"
-TRAILING_MULT  = float(os.getenv("TRAILING_MULT",  "1.0"))
+TRAILING_MULT  = float(os.getenv("TRAILING_MULT",  "1.2"))
 
 # --- Подтверждение отскока ---
 # true = вход только если цена закрылась с нужной стороны уровня (закрытие > entry для LONG и т.д.)
@@ -143,7 +143,7 @@ BOUNCE_CONFIRM            = os.getenv("BOUNCE_CONFIRM", "true").lower() == "true
 # true = позиция рассчитывается так, чтобы потеря при SL = RISK_PER_TRADE_PERCENT% баланса
 FIXED_RISK_MODE           = os.getenv("FIXED_RISK_MODE", "true").lower() == "true"
 RISK_PER_TRADE_PERCENT    = float(os.getenv("RISK_PER_TRADE_PERCENT", "1.0"))
-MAX_TRADE_SIZE_PERCENT    = float(os.getenv("MAX_TRADE_SIZE_PERCENT", "20.0"))
+MAX_TRADE_SIZE_PERCENT    = float(os.getenv("MAX_TRADE_SIZE_PERCENT", "10.0"))
 
 # --- HTF S/R подтверждение ---
 # Кол-во свечей HTF_TIMEFRAME для поиска уровней S/R (0 = отключить)
