@@ -16,6 +16,7 @@ MEXC Support & Resistance Signaler + Paper Trader
 
 import asyncio
 import logging
+import math
 import os
 import sys
 from datetime import datetime
@@ -48,7 +49,7 @@ from paper_trader import PaperPortfolio
 # ============================================================
 # ВЕРСИЯ
 # ============================================================
-BOT_VERSION = "1.5.0"
+BOT_VERSION = "1.6.0"
 
 # ============================================================
 # КОНФИГУРАЦИЯ
@@ -149,6 +150,14 @@ MAX_TRADE_SIZE_PERCENT    = float(os.getenv("MAX_TRADE_SIZE_PERCENT", "20.0"))
 HTF_SR_CANDLES            = int(os.getenv("HTF_SR_CANDLES", "200"))
 # true = сигналы только с HTF-подтверждением; false = предпочитать HTF, но не блокировать остальные
 HTF_SR_REQUIRE_CONFIRM    = os.getenv("HTF_SR_REQUIRE_CONFIRM", "false").lower() == "true"
+
+# --- Слой 2: конфлюенс зоны (EMA + FVG + круглые числа) ---
+# EMA-периоды, которые используются как динамические уровни (запятая-разделённые)
+EMA_CONFLUENCE_PERIODS    = [int(x) for x in os.getenv("EMA_CONFLUENCE_PERIODS", "21,50").split(",")]
+# Сколько последних свечей сканировать на FVG
+FVG_LOOKBACK              = int(os.getenv("FVG_LOOKBACK", "50"))
+# Минимальный разрыв FVG как % от цены (слишком мелкие игнорируются)
+FVG_MIN_GAP_PCT           = float(os.getenv("FVG_MIN_GAP_PCT", "0.1"))
 
 # --- Paper trading ---
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
@@ -355,6 +364,94 @@ def remove_duplicates(levels: List[Dict], tolerance: float) -> List[Dict]:
         ):
             unique.append(level)
     return unique
+
+
+# ---------------------------------------------------------------------------
+# Слой 2 — конфлюенс зоны: EMA + FVG + круглые числа
+# ---------------------------------------------------------------------------
+
+def _calc_ema_levels(df: pd.DataFrame, periods: List[int]) -> List[Dict]:
+    """EMA21/EMA50 (или другие периоды) как динамические уровни S/R."""
+    current = float(df["close"].iloc[-1])
+    lvls: List[Dict] = []
+    for period in periods:
+        if len(df) >= period:
+            val = float(df["close"].ewm(span=period, adjust=False).mean().iloc[-1])
+            lvls.append({
+                "price":   round(val, 8),
+                "type":    "SUPPORT" if current > val else "RESISTANCE",
+                "subtype": f"EMA{period}",
+            })
+    return lvls
+
+
+def _find_fvg_zones(
+    df: pd.DataFrame,
+    lookback: int = 50,
+    min_gap_pct: float = 0.1,
+) -> List[Dict]:
+    """3-свечные имбалансы (Fair Value Gap): bullish low[i] > high[i-2], bearish обратно."""
+    zones: List[Dict] = []
+    n     = len(df)
+    start = max(2, n - lookback)
+    for i in range(start, n):
+        h_prev2 = float(df["high"].iloc[i - 2])
+        l_prev2 = float(df["low"].iloc[i - 2])
+        l_curr  = float(df["low"].iloc[i])
+        h_curr  = float(df["high"].iloc[i])
+        if l_curr > h_prev2:                               # bullish FVG
+            mid = (h_prev2 + l_curr) / 2
+            if (l_curr - h_prev2) / mid * 100 >= min_gap_pct:
+                zones.append({"type": "SUPPORT", "bottom": h_prev2, "top": l_curr,
+                               "price": mid, "age_candles": n - 1 - i})
+        elif h_curr < l_prev2:                             # bearish FVG
+            mid = (h_curr + l_prev2) / 2
+            if (l_prev2 - h_curr) / mid * 100 >= min_gap_pct:
+                zones.append({"type": "RESISTANCE", "bottom": h_curr, "top": l_prev2,
+                               "price": mid, "age_candles": n - 1 - i})
+    return zones
+
+
+def _is_round_number(price: float, tol_pct: float = TOLERANCE_PERCENT) -> bool:
+    """True, если цена близка к круглому числу (1000, 500, 100, 50, …)."""
+    if price <= 0:
+        return False
+    tol = price * tol_pct / 100.0
+    mag = 10.0 ** math.floor(math.log10(price))
+    for step in (mag, mag / 2.0):
+        nearest = round(price / step) * step
+        if abs(price - nearest) <= tol:
+            return True
+    return False
+
+
+def _add_confluence_scores(
+    levels: List[Dict],
+    ema_lvls: List[Dict],
+    fvg_zones: List[Dict],
+    tolerance_pct: float = TOLERANCE_PERCENT,
+) -> None:
+    """Добавляет confluence_score и confluence_tags к каждому уровню S/R."""
+    tol = tolerance_pct / 100.0
+    for lvl in levels:
+        score = 0
+        tags: List[str] = []
+        p = lvl["price"]
+        for ema in ema_lvls:
+            if ema["type"] == lvl["type"] and abs(ema["price"] - p) / p <= tol:
+                score += 1
+                tags.append(ema["subtype"])
+        fvg_counted = False
+        for fvg in fvg_zones:
+            if not fvg_counted and fvg["type"] == lvl["type"] and fvg["bottom"] <= p <= fvg["top"]:
+                score += 1
+                tags.append("FVG")
+                fvg_counted = True
+        if _is_round_number(p, tolerance_pct):
+            score += 1
+            tags.append("🔢")
+        lvl["confluence_score"] = score
+        lvl["confluence_tags"]  = tags
 
 
 def find_support_resistance(
@@ -904,10 +1001,12 @@ def fmt_analysis(
                 ta_htf = "↑" if sig["htf_trend"] == "UP" else "↓"
                 ta_htf = f"  •  {HTF_TIMEFRAME}:{ta_htf}"
             adx_s = f"  •  ADX:{sig['adx']}" if sig.get("adx") is not None else ""
-            htf_mark = " ✨" if lvl.get("htf_confirmed") else ""
-            div_mark = " 📊" if sig.get("divergence") else ""
+            htf_mark   = " ✨" if lvl.get("htf_confirmed") else ""
+            div_mark   = " 📊" if sig.get("divergence") else ""
+            cf_tags    = lvl.get("confluence_tags", [])
+            cf_mark    = f" [{'+'.join(cf_tags)}]" if cf_tags else ""
             lines.append(
-                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}{htf_mark}{div_mark}"
+                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}{htf_mark}{div_mark}{cf_mark}"
                 f"  <i>({sig['distance_percent']}%)</i>"
             )
             lines.append(
@@ -937,9 +1036,11 @@ def fmt_analysis(
         sign    = "+" if dist >= 0 else ""
         retest   = " ✅" if lvl.get("has_retest") else ""
         htf_mark = " ✨" if lvl.get("htf_confirmed") else ""
+        cf_tags  = lvl.get("confluence_tags", [])
+        cf_mark  = f" [{'+'.join(cf_tags)}]" if cf_tags else ""
         lines.append(
             f"{emoji} <b>{_fp(lvl['price'])}</b> — {ru_type} "
-            f"(касаний: <b>{lvl['touches']}</b>, {sign}{dist:.2f}%{retest}{htf_mark})"
+            f"(касаний: <b>{lvl['touches']}</b>, {sign}{dist:.2f}%{retest}{htf_mark}{cf_mark})"
         )
     return "\n".join(lines)
 
@@ -1166,6 +1267,11 @@ async def analyze_pair(
     # 3. Уровни и сигналы
     levels = find_support_resistance(df)
 
+    # Слой 2: конфлюенс зоны — EMA + FVG + круглые числа
+    ema_lvls  = _calc_ema_levels(df, EMA_CONFLUENCE_PERIODS)
+    fvg_zones = _find_fvg_zones(df, FVG_LOOKBACK, FVG_MIN_GAP_PCT)
+    _add_confluence_scores(levels, ema_lvls, fvg_zones, TOLERANCE_PERCENT)
+
     # HTF: тренд + структура + S/R — один API-запрос на пару
     htf_trend, htf_ema, htf_sr, htf_structure = _fetch_htf_confluence(client, pair)
     if htf_sr:
@@ -1218,7 +1324,11 @@ async def analyze_pair(
 
     # 5. Ордера: всегда только для ближайшего уровня по направлению
     best: Dict[str, Optional[Dict]] = {"LONG": None, "SHORT": None}
-    for sig in sorted(signals, key=lambda s: (not s["level"].get("htf_confirmed", False), s["distance_percent"])):
+    for sig in sorted(signals, key=lambda s: (
+        not s["level"].get("htf_confirmed", False),
+        -s["level"].get("confluence_score", 0),
+        s["distance_percent"],
+    )):
         if best[sig["direction"]] is None:
             best[sig["direction"]] = sig
 
