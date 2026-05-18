@@ -689,7 +689,6 @@ _returns_cache: Dict[str, pd.Series] = {}
 
 
 def _check_correlation(pair: str, open_pairs: List[str]) -> bool:
-    """Return False if pair is too correlated with any already-open position."""
     if not open_pairs or CORR_MAX <= 0:
         return True
     r1 = _returns_cache.get(pair)
@@ -1296,7 +1295,9 @@ async def analyze_pair(
         logger.warning("Пропускаем %s (нет данных)", pair)
         return
 
-    _returns_cache[pair] = df["close"].pct_change().dropna().tail(CORR_LOOKBACK)
+    _returns_cache[pair] = (
+        df.set_index("timestamp")["close"].pct_change().dropna().tail(CORR_LOOKBACK)
+    )
 
     try:
         current_price = float(client.fetch_ticker(pair)["last"])
@@ -1576,6 +1577,8 @@ async def analysis_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     pairs = fetch_top_pairs(client, AUTO_TOP_PAIRS) if AUTO_TOP_PAIRS > 0 else TRADING_PAIRS
     context.bot_data["pairs"] = pairs
+    for stale in list(_returns_cache.keys() - set(pairs)):
+        del _returns_cache[stale]
     logger.info("=== Запуск анализа (%d пар) ===", len(pairs))
 
     for idx, pair in enumerate(pairs):
