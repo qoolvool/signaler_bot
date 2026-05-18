@@ -20,7 +20,7 @@ import math
 import os
 import sys
 from datetime import datetime
-from typing import Dict, FrozenSet, List, Optional
+from typing import Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 # load_dotenv MUST come before paper_trader import so DATA_DIR is applied to file paths
 try:
@@ -302,6 +302,27 @@ def fetch_ohlcv(
     except Exception as exc:
         logger.error("Ошибка загрузки OHLCV для %s: %s", symbol, exc)
         return None
+
+
+def _fetch_hl(
+    client: ccxt.mexc,
+    pair: str,
+    current_price: float,
+    fallback_h: Optional[float] = None,
+    fallback_l: Optional[float] = None,
+) -> Tuple[float, float]:
+    """Fetch recent high/low from CHECK_TIMEFRAME; falls back to supplied values or current_price."""
+    try:
+        raw = client.fetch_ohlcv(pair, CHECK_TIMEFRAME, limit=5)
+        if raw and len(raw) >= 2:
+            h = max(r[2] for r in raw[-2:])
+            l = min(r[3] for r in raw[-2:])
+        else:
+            raise ValueError("мало свечей")
+    except Exception:
+        h = fallback_h if fallback_h is not None else current_price
+        l = fallback_l if fallback_l is not None else current_price
+    return max(h, current_price), min(l, current_price)
 
 
 # ============================================================
@@ -946,6 +967,31 @@ async def send_msg(bot: Bot, text: str) -> bool:
         return False
 
 
+async def _run_position_checks(
+    bot: Bot,
+    pair: str,
+    h: float,
+    l: float,
+    current_price: float,
+) -> None:
+    """BE → trailing → SL/TP → pending fill → BE → trailing → SL/TP (post-fill)."""
+    for trade in portfolio.check_breakeven(pair, h, l):
+        await send_msg(bot, fmt_sl_to_breakeven(trade))
+    portfolio.check_trailing_stop(pair, h, l)
+    for closed in portfolio.check_sl_tp(pair, h, l):
+        await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
+
+    triggered, _ = portfolio.check_pending_orders(
+        pair, h, l, candle_close=current_price, require_bounce=BOUNCE_CONFIRM,
+    )
+    if triggered:
+        for trade in portfolio.check_breakeven(pair, h, l):
+            await send_msg(bot, fmt_sl_to_breakeven(trade))
+        portfolio.check_trailing_stop(pair, h, l)
+        for closed in portfolio.check_sl_tp(pair, h, l):
+            await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
+
+
 # ============================================================
 # ФОРМАТИРОВАНИЕ СООБЩЕНИЙ
 # ============================================================
@@ -1282,85 +1328,44 @@ def _fetch_current_prices(client, trades: List[Dict]) -> Dict[str, float]:
 # ============================================================
 # АНАЛИЗ ПАРЫ (с бумажной торговлей)
 # ============================================================
-async def analyze_pair(
-    client: ccxt.mexc,
-    bot: Bot,
+
+class _PairAnalysis(NamedTuple):
+    levels:        List[Dict]
+    signals:       List[Dict]
+    htf_trend:     Optional[str]
+    htf_ema:       Optional[float]
+    adx_val:       Optional[float]
+    rsi_val:       float
+    atr_ratio:     float
+    regime:        str
+    htf_structure: Optional[str]
+
+
+async def _compute_analysis(
+    df: pd.DataFrame,
     pair: str,
-) -> None:
-    logger.info("Анализ: %s", pair)
-
-    # Основной TF для анализа уровней и сигналов
-    df = fetch_ohlcv(client, pair, TIMEFRAME, CANDLES_LIMIT)
-    if df is None or df.empty:
-        logger.warning("Пропускаем %s (нет данных)", pair)
-        return
-
-    _returns_cache[pair] = (
-        df.set_index("timestamp")["close"].pct_change().dropna().tail(CORR_LOOKBACK)
-    )
-
-    try:
-        current_price = float(client.fetch_ticker(pair)["last"])
-    except Exception:
-        current_price = float(df["close"].iloc[-1])
-    portfolio.update_price(pair, current_price)
-
-    # Короткий TF для SL/TP — прямой вызов CCXT (без проверки min_candles из fetch_ohlcv)
-    try:
-        raw_check = client.fetch_ohlcv(pair, CHECK_TIMEFRAME, limit=5)
-        if raw_check and len(raw_check) >= 2:
-            h = max(r[2] for r in raw_check[-2:])  # high
-            l = min(r[3] for r in raw_check[-2:])  # low
-        else:
-            raise ValueError("мало свечей")
-    except Exception:
-        h = max(float(df["high"].iloc[-2]), float(df["high"].iloc[-1]))
-        l = min(float(df["low"].iloc[-2]),  float(df["low"].iloc[-1]))
-
-    # Всегда включаем текущую живую цену, чтобы SL/TP срабатывал без задержки
-    h = max(h, current_price)
-    l = min(l, current_price)
-
-    # 1. Безубыток → трейлинг → SL/TP для уже открытых сделок
-    for trade in portfolio.check_breakeven(pair, h, l):
-        await send_msg(bot, fmt_sl_to_breakeven(trade))
-    portfolio.check_trailing_stop(pair, h, l)
-    for trade in portfolio.check_sl_tp(pair, h, l):
-        await send_msg(bot, fmt_trade_closed(trade, portfolio.get_equity()))
-
-    # 2. Проверка ожидающих ордеров — коснулась ли цена уровня
-    triggered, _ = portfolio.check_pending_orders(pair, h, l,
-                                                   candle_close=current_price,
-                                                   require_bounce=BOUNCE_CONFIRM)
-    # Та же свеча могла сразу достичь BE или SL/TP у только что открытых сделок
-    for trade in portfolio.check_breakeven(pair, h, l):
-        await send_msg(bot, fmt_sl_to_breakeven(trade))
-    portfolio.check_trailing_stop(pair, h, l)
-    for closed in portfolio.check_sl_tp(pair, h, l):
-        await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
-
-    # 3. Уровни и сигналы
-    levels = find_support_resistance(df)
-
-    # Слой 2: конфлюенс зоны — EMA + FVG + круглые числа
+    client: ccxt.mexc,
+    current_price: float,
+) -> _PairAnalysis:
+    levels    = find_support_resistance(df)
     ema_lvls  = _calc_ema_levels(df, EMA_CONFLUENCE_PERIODS)
     fvg_zones = _find_fvg_zones(df, FVG_LOOKBACK, FVG_MIN_GAP_PCT)
     _add_confluence_scores(levels, ema_lvls, fvg_zones, TOLERANCE_PERCENT)
 
-    # HTF: тренд + структура + S/R — один API-запрос на пару
-    htf_trend, htf_ema, htf_sr, htf_structure = _fetch_htf_confluence(client, pair)
+    htf_trend, htf_ema, htf_sr, htf_structure = await asyncio.to_thread(
+        _fetch_htf_confluence, client, pair,
+    )
     if htf_sr:
         _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
     adx_val, _, _ = _calc_adx(df, ADX_PERIOD)
 
-    # RSI + ATR-ratio → режим рынка
     rsi_series = _calc_rsi_series(df, RSI_PERIOD)
     rsi_raw    = float(rsi_series.iloc[-1])
-    rsi_val    = rsi_raw if not pd.isna(rsi_raw) else 50.0  # NaN → нейтральное значение
+    rsi_val    = rsi_raw if not pd.isna(rsi_raw) else 50.0
     atr_ratio  = _calc_atr_ratio(df, ATR_PERIOD)
     regime     = _detect_regime(rsi_series, atr_ratio)
-    crash_low  = _find_crash_low(df, CRASH_LOW_LOOKBACK)  if regime == "RECOVERY"   else None
-    pump_high  = _find_pump_high(df, PUMP_HIGH_LOOKBACK)  if regime == "CORRECTION" else None
+    crash_low  = _find_crash_low(df, CRASH_LOW_LOOKBACK) if regime == "RECOVERY"   else None
+    pump_high  = _find_pump_high(df, PUMP_HIGH_LOOKBACK) if regime == "CORRECTION" else None
 
     logger.info(
         "%s | HTF(%s)=%s  структура=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
@@ -1371,7 +1376,7 @@ async def analyze_pair(
     )
 
     signal_levels = (
-        [l for l in levels if l.get("htf_confirmed")]
+        [lvl for lvl in levels if lvl.get("htf_confirmed")]
         if HTF_SR_REQUIRE_CONFIRM and htf_sr
         else levels
     )
@@ -1385,19 +1390,16 @@ async def analyze_pair(
         htf_structure=htf_structure,
         rsi_series=rsi_series,
     )
-
-    # 4. Сохраняем отчёт в БД (без авто-отправки — доступен по кнопке монеты)
-    portfolio.save_report(pair, fmt_analysis(
-        pair, TIMEFRAME, current_price, levels, signals,
+    return _PairAnalysis(
+        levels=levels, signals=signals,
         htf_trend=htf_trend, htf_ema=htf_ema,
-        adx=round(adx_val, 1) if adx_val is not None else None,
-        rsi=round(rsi_val, 1),
-        atr_ratio=atr_ratio,
-        regime=regime,
+        adx_val=adx_val, rsi_val=rsi_val,
+        atr_ratio=atr_ratio, regime=regime,
         htf_structure=htf_structure,
-    ))
+    )
 
-    # 5. Ордера: всегда только для ближайшего уровня по направлению
+
+def _apply_orders(pair: str, signals: List[Dict]) -> None:
     best: Dict[str, Optional[Dict]] = {"LONG": None, "SHORT": None}
     for sig in sorted(signals, key=lambda s: (
         not s["level"].get("htf_confirmed", False),
@@ -1407,7 +1409,6 @@ async def analyze_pair(
         if best[sig["direction"]] is None:
             best[sig["direction"]] = sig
 
-    # Фильтр корреляции: не открывать ордера рядом с уже открытыми коррелирующими позициями
     open_pairs = [t["pair"] for t in portfolio.open_trades if t["pair"] != pair]
     if not _check_correlation(pair, open_pairs):
         logger.info(
@@ -1416,7 +1417,6 @@ async def analyze_pair(
         )
         best = {"LONG": None, "SHORT": None}
 
-    # Отменяем ордера, у которых теперь не самый близкий уровень (молча)
     tolerance = TOLERANCE_PERCENT / 100
     for order in list(portfolio.pending_orders):
         if order["pair"] != pair:
@@ -1429,7 +1429,6 @@ async def analyze_pair(
         if not same_level:
             portfolio.cancel_order(order)
 
-    # Создаём ордер только для ближайшего уровня (молча)
     for sig in best.values():
         if sig is None or sig["tp"] is None:
             continue
@@ -1440,6 +1439,51 @@ async def analyze_pair(
             sl=sig["sl"],
             tp=sig["tp"],
         )
+
+
+async def analyze_pair(
+    client: ccxt.mexc,
+    bot: Bot,
+    pair: str,
+) -> None:
+    logger.info("Анализ: %s", pair)
+
+    df = await asyncio.to_thread(fetch_ohlcv, client, pair, TIMEFRAME, CANDLES_LIMIT)
+    if df is None or df.empty:
+        logger.warning("Пропускаем %s (нет данных)", pair)
+        return
+
+    _returns_cache[pair] = (
+        df.set_index("timestamp")["close"].pct_change().dropna().tail(CORR_LOOKBACK)
+    )
+
+    try:
+        ticker = await asyncio.to_thread(client.fetch_ticker, pair)
+        current_price = float(ticker["last"])
+    except Exception:
+        current_price = float(df["close"].iloc[-1])
+    portfolio.update_price(pair, current_price)
+
+    h, l = await asyncio.to_thread(
+        _fetch_hl, client, pair, current_price,
+        max(float(df["high"].iloc[-2]), float(df["high"].iloc[-1])),
+        min(float(df["low"].iloc[-2]),  float(df["low"].iloc[-1])),
+    )
+    await _run_position_checks(bot, pair, h, l, current_price)
+
+    analysis = await _compute_analysis(df, pair, client, current_price)
+
+    portfolio.save_report(pair, fmt_analysis(
+        pair, TIMEFRAME, current_price, analysis.levels, analysis.signals,
+        htf_trend=analysis.htf_trend, htf_ema=analysis.htf_ema,
+        adx=round(analysis.adx_val, 1) if analysis.adx_val is not None else None,
+        rsi=round(analysis.rsi_val, 1),
+        atr_ratio=analysis.atr_ratio,
+        regime=analysis.regime,
+        htf_structure=analysis.htf_structure,
+    ))
+
+    _apply_orders(pair, analysis.signals)
 
 
 # ============================================================
@@ -1530,39 +1574,14 @@ async def fast_check_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     for pair in pairs:
         try:
             try:
-                current_price = float(client.fetch_ticker(pair)["last"])
+                ticker = await asyncio.to_thread(client.fetch_ticker, pair)
+                current_price = float(ticker["last"])
             except Exception:
                 continue
             portfolio.update_price(pair, current_price)
 
-            try:
-                raw = client.fetch_ohlcv(pair, CHECK_TIMEFRAME, limit=5)
-                if raw and len(raw) >= 2:
-                    h = max(r[2] for r in raw[-2:])
-                    l = min(r[3] for r in raw[-2:])
-                else:
-                    raise ValueError("мало свечей")
-            except Exception:
-                h = l = current_price
-            h = max(h, current_price)
-            l = min(l, current_price)
-
-            for trade in portfolio.check_breakeven(pair, h, l):
-                await send_msg(bot, fmt_sl_to_breakeven(trade))
-            portfolio.check_trailing_stop(pair, h, l)
-
-            for closed in portfolio.check_sl_tp(pair, h, l):
-                await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
-
-            triggered, _ = portfolio.check_pending_orders(pair, h, l,
-                                                           candle_close=current_price,
-                                                           require_bounce=BOUNCE_CONFIRM)
-            if triggered:
-                for trade in portfolio.check_breakeven(pair, h, l):
-                    await send_msg(bot, fmt_sl_to_breakeven(trade))
-                portfolio.check_trailing_stop(pair, h, l)
-                for closed in portfolio.check_sl_tp(pair, h, l):
-                    await send_msg(bot, fmt_trade_closed(closed, portfolio.get_equity()))
+            h, l = await asyncio.to_thread(_fetch_hl, client, pair, current_price)
+            await _run_position_checks(bot, pair, h, l, current_price)
 
         except Exception as exc:
             logger.error("fast_check %s: %s", pair, exc)
@@ -1575,7 +1594,10 @@ async def analysis_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     client = context.bot_data["client"]
     bot    = context.bot
 
-    pairs = fetch_top_pairs(client, AUTO_TOP_PAIRS) if AUTO_TOP_PAIRS > 0 else TRADING_PAIRS
+    pairs = (
+        await asyncio.to_thread(fetch_top_pairs, client, AUTO_TOP_PAIRS)
+        if AUTO_TOP_PAIRS > 0 else TRADING_PAIRS
+    )
     context.bot_data["pairs"] = pairs
     for stale in list(_returns_cache.keys() - set(pairs)):
         del _returns_cache[stale]
