@@ -20,7 +20,7 @@ import math
 import os
 import sys
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional
 
 # load_dotenv MUST come before paper_trader import so DATA_DIR is applied to file paths
 try:
@@ -666,9 +666,9 @@ def _detect_candle_pattern(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
-# Множества паттернов по направлению — должны совпадать со строками _detect_candle_pattern
-_BULLISH_PATTERNS: frozenset = frozenset({"молот 🔨", "бычье поглощение 🕯"})
-_BEARISH_PATTERNS: frozenset = frozenset({"падающая звезда ⭐", "медвежье поглощение 🕯"})
+# Должны совпадать со строками _detect_candle_pattern — при добавлении паттерна обновить оба множества
+_BULLISH_PATTERNS: FrozenSet[str] = frozenset({"молот 🔨", "бычье поглощение 🕯"})
+_BEARISH_PATTERNS: FrozenSet[str] = frozenset({"падающая звезда ⭐", "медвежье поглощение 🕯"})
 
 
 def _detect_rsi_divergence(
@@ -735,16 +735,19 @@ def find_entry_signals(
     ema_trend   = "UP" if current_price > ema_val else "DOWN"
     pattern     = _detect_candle_pattern(df)
     atr         = _calc_atr(df, atr_period)
-
-    # Layer 3B: объём сигнальной свечи vs скользящее среднее последних 50
-    sig_vol   = float(df["volume"].iloc[-2])
-    avg_vol   = float(df["volume"].iloc[-51:-1].mean())
-    vol_ratio = round(sig_vol / avg_vol, 1) if avg_vol > 0 else 1.0
-    vol_spike = SIGNAL_VOLUME_MULT > 0 and vol_ratio >= SIGNAL_VOLUME_MULT
     # БАГ 7 fix: ATR может быть NaN при недостатке данных — всё что дальше использует его сломается
     if pd.isna(atr) or atr <= 0:
         logger.warning("ATR некорректен (%.6f) для %s — сигналы пропущены", atr, regime)
         return []
+
+    if SIGNAL_VOLUME_MULT > 0:
+        sig_vol   = float(df["volume"].iloc[-2])
+        avg_vol   = float(df["volume"].iloc[-51:-1].mean())
+        vol_ratio = round(sig_vol / avg_vol, 1) if avg_vol > 0 else None
+        vol_spike = vol_ratio is not None and vol_ratio >= SIGNAL_VOLUME_MULT
+    else:
+        vol_ratio = None
+        vol_spike = False
     recovery    = (regime == "RECOVERY")
     correction  = (regime == "CORRECTION")
     special     = recovery or correction  # оба режима отключают стандартные фильтры
@@ -791,13 +794,11 @@ def find_entry_signals(
             if not special and REQUIRE_RSI_DIVERGENCE and not divergence:
                 continue
 
-        # Layer 3A — паттерн: только разворотные паттерны в нужную сторону
         expected_patterns = _BULLISH_PATTERNS if direction == "LONG" else _BEARISH_PATTERNS
         pattern_confirmed = pattern in expected_patterns
         if not special and REQUIRE_PATTERN and not pattern_confirmed:
             continue
 
-        # Layer 3B — объём сигнальной свечи
         if not special and SIGNAL_VOLUME_MULT > 0 and not vol_spike:
             continue
 
