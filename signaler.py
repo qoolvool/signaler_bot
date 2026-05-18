@@ -153,7 +153,7 @@ HTF_SR_REQUIRE_CONFIRM    = os.getenv("HTF_SR_REQUIRE_CONFIRM", "false").lower()
 
 # --- Слой 2: конфлюенс зоны (EMA + FVG + круглые числа) ---
 # EMA-периоды, которые используются как динамические уровни (запятая-разделённые)
-EMA_CONFLUENCE_PERIODS    = [int(x) for x in os.getenv("EMA_CONFLUENCE_PERIODS", "21,50").split(",")]
+EMA_CONFLUENCE_PERIODS    = [int(x.strip()) for x in os.getenv("EMA_CONFLUENCE_PERIODS", "21,50").split(",") if x.strip()]
 # Сколько последних свечей сканировать на FVG
 FVG_LOOKBACK              = int(os.getenv("FVG_LOOKBACK", "50"))
 # Минимальный разрыв FVG как % от цены (слишком мелкие игнорируются)
@@ -376,7 +376,7 @@ def _calc_ema_levels(df: pd.DataFrame, periods: List[int]) -> List[Dict]:
     lvls: List[Dict] = []
     for period in periods:
         if len(df) >= period:
-            val = float(df["close"].ewm(span=period, adjust=False).mean().iloc[-1])
+            val = float(_calc_ema(df["close"], period).iloc[-1])
             lvls.append({
                 "price":   round(val, 8),
                 "type":    "SUPPORT" if current > val else "RESISTANCE",
@@ -394,21 +394,21 @@ def _find_fvg_zones(
     zones: List[Dict] = []
     n     = len(df)
     start = max(2, n - lookback)
+    high  = df["high"].to_numpy()
+    low   = df["low"].to_numpy()
     for i in range(start, n):
-        h_prev2 = float(df["high"].iloc[i - 2])
-        l_prev2 = float(df["low"].iloc[i - 2])
-        l_curr  = float(df["low"].iloc[i])
-        h_curr  = float(df["high"].iloc[i])
-        if l_curr > h_prev2:                               # bullish FVG
+        h_prev2, l_prev2 = high[i - 2], low[i - 2]
+        h_curr,  l_curr  = high[i],     low[i]
+        if l_curr > h_prev2:
             mid = (h_prev2 + l_curr) / 2
             if (l_curr - h_prev2) / mid * 100 >= min_gap_pct:
-                zones.append({"type": "SUPPORT", "bottom": h_prev2, "top": l_curr,
-                               "price": mid, "age_candles": n - 1 - i})
-        elif h_curr < l_prev2:                             # bearish FVG
+                zones.append({"type": "SUPPORT", "bottom": float(h_prev2), "top": float(l_curr),
+                               "price": float(mid), "age_candles": n - 1 - i})
+        elif h_curr < l_prev2:
             mid = (h_curr + l_prev2) / 2
             if (l_prev2 - h_curr) / mid * 100 >= min_gap_pct:
-                zones.append({"type": "RESISTANCE", "bottom": h_curr, "top": l_prev2,
-                               "price": mid, "age_candles": n - 1 - i})
+                zones.append({"type": "RESISTANCE", "bottom": float(h_curr), "top": float(l_prev2),
+                               "price": float(mid), "age_candles": n - 1 - i})
     return zones
 
 
@@ -434,23 +434,18 @@ def _add_confluence_scores(
     """Добавляет confluence_score и confluence_tags к каждому уровню S/R."""
     tol = tolerance_pct / 100.0
     for lvl in levels:
-        score = 0
         tags: List[str] = []
         p = lvl["price"]
         for ema in ema_lvls:
             if ema["type"] == lvl["type"] and abs(ema["price"] - p) / p <= tol:
-                score += 1
                 tags.append(ema["subtype"])
-        fvg_counted = False
         for fvg in fvg_zones:
-            if not fvg_counted and fvg["type"] == lvl["type"] and fvg["bottom"] <= p <= fvg["top"]:
-                score += 1
+            if fvg["type"] == lvl["type"] and fvg["bottom"] <= p <= fvg["top"]:
                 tags.append("FVG")
-                fvg_counted = True
+                break
         if _is_round_number(p, tolerance_pct):
-            score += 1
             tags.append("🔢")
-        lvl["confluence_score"] = score
+        lvl["confluence_score"] = len(tags)
         lvl["confluence_tags"]  = tags
 
 
