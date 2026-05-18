@@ -49,7 +49,7 @@ from paper_trader import PaperPortfolio
 # ============================================================
 # ВЕРСИЯ
 # ============================================================
-BOT_VERSION = "1.7.0"
+BOT_VERSION = "1.8.0"
 
 # ============================================================
 # КОНФИГУРАЦИЯ
@@ -62,10 +62,19 @@ TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "")
 
 TRADING_PAIRS = [
     p.strip() for p in os.getenv("TRADING_PAIRS", (
-        "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,"
-        "ADA/USDT,AVAX/USDT,DOT/USDT,ATOM/USDT,LINK/USDT,"
-        "LTC/USDT,NEAR/USDT,UNI/USDT,FIL/USDT,INJ/USDT,"
-        "RNDR/USDT,TON/USDT,SUI/USDT,ARB/USDT,OP/USDT"
+        # 12 пар из разных секторов — минимальная межсекторная корреляция
+        "BTC/USDT,"   # цифровое золото / benchmark
+        "ETH/USDT,"   # L1 / DeFi-база
+        "SOL/USDT,"   # high-perf L1
+        "XRP/USDT,"   # payments / регуляторный сектор
+        "BNB/USDT,"   # exchange token
+        "LINK/USDT,"  # oracle / инфраструктура
+        "ARB/USDT,"   # L2 экосистема Ethereum
+        "RNDR/USDT,"  # AI / GPU compute
+        "ATOM/USDT,"  # межсетевое взаимодействие
+        "TON/USDT,"   # мессенджер-экосистема
+        "SUI/USDT,"   # новый L1
+        "LTC/USDT"    # Bitcoin-proxy с отдельной динамикой
     )).split(",")
     if p.strip()
 ]
@@ -164,6 +173,12 @@ FVG_MIN_GAP_PCT           = float(os.getenv("FVG_MIN_GAP_PCT", "0.1"))
 REQUIRE_PATTERN    = os.getenv("REQUIRE_PATTERN", "false").lower() == "true"
 # Объём сигнальной свечи должен быть ≥ avg × SIGNAL_VOLUME_MULT (0 = фильтр выключен)
 SIGNAL_VOLUME_MULT = float(os.getenv("SIGNAL_VOLUME_MULT", "0"))
+
+# --- Фильтр корреляции / Correlation filter ---
+# Количество последних свечей для расчёта корреляции доходностей
+CORR_LOOKBACK = int(os.getenv("CORR_LOOKBACK", "48"))
+# Максимальная допустимая корреляция с уже открытой позицией (0 = фильтр выключен)
+CORR_MAX      = float(os.getenv("CORR_MAX", "0.75"))
 
 # --- Paper trading ---
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
@@ -669,6 +684,27 @@ def _detect_candle_pattern(df: pd.DataFrame) -> Optional[str]:
 # Должны совпадать со строками _detect_candle_pattern — при добавлении паттерна обновить оба множества
 _BULLISH_PATTERNS: FrozenSet[str] = frozenset({"молот 🔨", "бычье поглощение 🕯"})
 _BEARISH_PATTERNS: FrozenSet[str] = frozenset({"падающая звезда ⭐", "медвежье поглощение 🕯"})
+
+_returns_cache: Dict[str, pd.Series] = {}
+
+
+def _check_correlation(pair: str, open_pairs: List[str]) -> bool:
+    """Return False if pair is too correlated with any already-open position."""
+    if not open_pairs or CORR_MAX <= 0:
+        return True
+    r1 = _returns_cache.get(pair)
+    if r1 is None:
+        return True
+    for op in open_pairs:
+        r2 = _returns_cache.get(op)
+        if r2 is None:
+            continue
+        combined = pd.concat([r1, r2], axis=1).dropna()
+        if len(combined) < 10:
+            continue
+        if abs(combined.iloc[:, 0].corr(combined.iloc[:, 1])) > CORR_MAX:
+            return False
+    return True
 
 
 def _detect_rsi_divergence(
@@ -1260,6 +1296,8 @@ async def analyze_pair(
         logger.warning("Пропускаем %s (нет данных)", pair)
         return
 
+    _returns_cache[pair] = df["close"].pct_change().dropna().tail(CORR_LOOKBACK)
+
     try:
         current_price = float(client.fetch_ticker(pair)["last"])
     except Exception:
@@ -1367,6 +1405,15 @@ async def analyze_pair(
     )):
         if best[sig["direction"]] is None:
             best[sig["direction"]] = sig
+
+    # Фильтр корреляции: не открывать ордера рядом с уже открытыми коррелирующими позициями
+    open_pairs = [t["pair"] for t in portfolio.open_trades if t["pair"] != pair]
+    if not _check_correlation(pair, open_pairs):
+        logger.info(
+            "Пропуск ордеров %s: высокая корреляция с открытыми позициями (>%.2f)",
+            pair, CORR_MAX,
+        )
+        best = {"LONG": None, "SHORT": None}
 
     # Отменяем ордера, у которых теперь не самый близкий уровень (молча)
     tolerance = TOLERANCE_PERCENT / 100
