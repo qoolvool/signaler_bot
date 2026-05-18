@@ -49,7 +49,7 @@ from paper_trader import PaperPortfolio
 # ============================================================
 # ВЕРСИЯ
 # ============================================================
-BOT_VERSION = "1.6.0"
+BOT_VERSION = "1.7.0"
 
 # ============================================================
 # КОНФИГУРАЦИЯ
@@ -158,6 +158,12 @@ EMA_CONFLUENCE_PERIODS    = [int(x.strip()) for x in os.getenv("EMA_CONFLUENCE_P
 FVG_LOOKBACK              = int(os.getenv("FVG_LOOKBACK", "50"))
 # Минимальный разрыв FVG как % от цены (слишком мелкие игнорируются)
 FVG_MIN_GAP_PCT           = float(os.getenv("FVG_MIN_GAP_PCT", "0.1"))
+
+# --- Слой 3: триггер входа (паттерн + объём) ---
+# true = сигнал генерируется только при наличии разворотного паттерна в нужную сторону
+REQUIRE_PATTERN    = os.getenv("REQUIRE_PATTERN", "false").lower() == "true"
+# Объём сигнальной свечи должен быть ≥ avg × SIGNAL_VOLUME_MULT (0 = фильтр выключен)
+SIGNAL_VOLUME_MULT = float(os.getenv("SIGNAL_VOLUME_MULT", "0"))
 
 # --- Paper trading ---
 INITIAL_BALANCE        = float(os.getenv("INITIAL_BALANCE", "1000"))
@@ -660,6 +666,11 @@ def _detect_candle_pattern(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
+# Множества паттернов по направлению — должны совпадать со строками _detect_candle_pattern
+_BULLISH_PATTERNS: frozenset = frozenset({"молот 🔨", "бычье поглощение 🕯"})
+_BEARISH_PATTERNS: frozenset = frozenset({"падающая звезда ⭐", "медвежье поглощение 🕯"})
+
+
 def _detect_rsi_divergence(
     df: pd.DataFrame,
     rsi_series: pd.Series,
@@ -724,6 +735,12 @@ def find_entry_signals(
     ema_trend   = "UP" if current_price > ema_val else "DOWN"
     pattern     = _detect_candle_pattern(df)
     atr         = _calc_atr(df, atr_period)
+
+    # Layer 3B: объём сигнальной свечи vs скользящее среднее последних 50
+    sig_vol   = float(df["volume"].iloc[-2])
+    avg_vol   = float(df["volume"].iloc[-51:-1].mean())
+    vol_ratio = round(sig_vol / avg_vol, 1) if avg_vol > 0 else 1.0
+    vol_spike = SIGNAL_VOLUME_MULT > 0 and vol_ratio >= SIGNAL_VOLUME_MULT
     # БАГ 7 fix: ATR может быть NaN при недостатке данных — всё что дальше использует его сломается
     if pd.isna(atr) or atr <= 0:
         logger.warning("ATR некорректен (%.6f) для %s — сигналы пропущены", atr, regime)
@@ -773,6 +790,16 @@ def find_entry_signals(
             divergence = _detect_rsi_divergence(df, rsi_series, direction, entry)
             if not special and REQUIRE_RSI_DIVERGENCE and not divergence:
                 continue
+
+        # Layer 3A — паттерн: только разворотные паттерны в нужную сторону
+        expected_patterns = _BULLISH_PATTERNS if direction == "LONG" else _BEARISH_PATTERNS
+        pattern_confirmed = pattern in expected_patterns
+        if not special and REQUIRE_PATTERN and not pattern_confirmed:
+            continue
+
+        # Layer 3B — объём сигнальной свечи
+        if not special and SIGNAL_VOLUME_MULT > 0 and not vol_spike:
+            continue
 
         if recovery and crash_low is not None:
             sl      = crash_low * (1.0 - CRASH_SL_BUFFER / 100.0)
@@ -859,6 +886,9 @@ def find_entry_signals(
             "reward_pct":       reward_pct,
             "regime":           regime,
             "divergence":       divergence,
+            "pattern_confirmed": pattern_confirmed,
+            "vol_ratio":        vol_ratio,
+            "volume_spike":     vol_spike,
         })
     return signals
 
@@ -998,18 +1028,28 @@ def fmt_analysis(
             adx_s = f"  •  ADX:{sig['adx']}" if sig.get("adx") is not None else ""
             htf_mark   = " ✨" if lvl.get("htf_confirmed") else ""
             div_mark   = " 📊" if sig.get("divergence") else ""
+            patt_mark  = " 🕯" if sig.get("pattern_confirmed") else ""
+            vol_mark   = " ⚡" if sig.get("volume_spike") else ""
             cf_tags    = lvl.get("confluence_tags", [])
             cf_mark    = f" [{'+'.join(cf_tags)}]" if cf_tags else ""
             lines.append(
-                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}{htf_mark}{div_mark}{cf_mark}"
+                f"{de} <b>{sig['direction']}</b>  вблизи {_fp(lvl['price'])}"
+                f"{htf_mark}{div_mark}{patt_mark}{vol_mark}{cf_mark}"
                 f"  <i>({sig['distance_percent']}%)</i>"
             )
             lines.append(
                 f"   {ta_30} EMA{EMA_PERIOD}={_fp(sig['ema'])}{ta_htf}{adx_s}"
                 f"  •  ATR={_fp(sig['atr'])}"
             )
-            if sig["pattern"]:
-                lines.append(f"   Паттерн: {sig['pattern']}")
+            trig_parts = []
+            if sig.get("pattern"):
+                patt_str = f"🕯 {sig['pattern']}" if sig.get("pattern_confirmed") else sig["pattern"]
+                trig_parts.append(patt_str)
+            if sig.get("vol_ratio") is not None:
+                vol_str = f"⚡ объём ×{sig['vol_ratio']}" if sig.get("volume_spike") else f"объём ×{sig['vol_ratio']}"
+                trig_parts.append(vol_str)
+            if trig_parts:
+                lines.append(f"   Триггер: {'  •  '.join(trig_parts)}")
             rr_str = f"  •  R:R 1:{sig['rr']}" if sig["rr"] else ""
             lines.append(
                 f"   SL: <b>{_fp(sig['sl'])}</b> (-{sig['risk_pct']}%)"
