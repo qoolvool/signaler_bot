@@ -493,11 +493,10 @@ def _find_pump_high(df: pd.DataFrame, lookback: int = 20) -> float:
     return float(df["high"].iloc[-lookback:].max())
 
 
-def _detect_htf_structure(raw: list, window: int = HTF_STRUCTURE_WINDOW) -> str:
+def _detect_htf_structure(df: pd.DataFrame, window: int = HTF_STRUCTURE_WINDOW) -> str:
     """Структура HTF по последним двум свингам: BULLISH (HH+HL), BEARISH (LH+LL), RANGE."""
-    if not raw or len(raw) < window * 4 + 1:
+    if df is None or len(df) < window * 4 + 1:
         return "RANGE"
-    df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
     highs = _find_local_extrema(df["high"], window, "max")
     lows  = _find_local_extrema(df["low"],  window, "min")
     if len(highs) < 2 or len(lows) < 2:
@@ -518,14 +517,14 @@ def _fetch_htf_confluence(client, pair: str):
         raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=needed)
         if not raw or len(raw) < HTF_EMA_PERIOD:
             return None, None, [], "RANGE"
-        closes = pd.Series([float(r[4]) for r in raw])
-        ema    = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
-        trend  = "UP" if float(raw[-1][4]) > ema else "DOWN"
-        structure = _detect_htf_structure(raw)
+        df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
+        closes = df_htf["close"].astype(float)
+        ema       = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
+        trend     = "UP" if float(closes.iloc[-1]) > ema else "DOWN"
+        structure = _detect_htf_structure(df_htf)
         htf_sr: List[Dict] = []
-        if HTF_SR_CANDLES > 0 and len(raw) >= EXTREMA_WINDOW * 2 + 1:
-            df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
+        if HTF_SR_CANDLES > 0 and len(df_htf) >= EXTREMA_WINDOW * 2 + 1:
             htf_sr = find_support_resistance(df_htf)
         return trend, round(ema, 8), htf_sr, structure
     except Exception as exc:
@@ -580,32 +579,25 @@ def _detect_rsi_divergence(
     """
     Бычья дивергенция (LONG): цена делает LL у уровня поддержки, RSI — HL.
     Медвежья (SHORT): цена делает HH у уровня сопротивления, RSI — LH.
-    Ищет свинги в зоне ±4× tolerance вокруг level_price.
+    Ищет свинги в зоне ±4×tolerance вокруг level_price — достаточно широко,
+    чтобы захватить все касания зоны, но не соседние уровни.
     """
-    tol = proximity_pct / 100.0 * 4
-    n   = len(rsi_series)
-    if direction == "LONG":
-        swings = _find_local_extrema(df["low"], window, "min")
-        near   = [(p, i) for p, i in swings if abs(p - level_price) / level_price <= tol]
-        if len(near) < 2:
-            return False
-        (p1, i1), (p2, i2) = near[-2], near[-1]
-        if p2 >= p1:
-            return False  # нет нового лоя → дивергенции нет
-        r1 = float(rsi_series.iloc[i1]) if i1 < n else 50.0
-        r2 = float(rsi_series.iloc[i2]) if i2 < n else 50.0
-        return r2 > r1  # RSI выше → бычья дивергенция
-    else:
-        swings = _find_local_extrema(df["high"], window, "max")
-        near   = [(p, i) for p, i in swings if abs(p - level_price) / level_price <= tol]
-        if len(near) < 2:
-            return False
-        (p1, i1), (p2, i2) = near[-2], near[-1]
-        if p2 <= p1:
-            return False  # нет нового хая → дивергенции нет
-        r1 = float(rsi_series.iloc[i1]) if i1 < n else 50.0
-        r2 = float(rsi_series.iloc[i2]) if i2 < n else 50.0
-        return r2 < r1  # RSI ниже → медвежья дивергенция
+    tol    = proximity_pct / 100.0 * 4
+    n      = len(rsi_series)
+    long   = direction == "LONG"
+    series = df["low"] if long else df["high"]
+    kind   = "min" if long else "max"
+    swings = _find_local_extrema(series, window, kind)
+    near   = [(p, i) for p, i in swings if abs(p - level_price) / level_price <= tol]
+    if len(near) < 2:
+        return False
+    (p1, i1), (p2, i2) = near[-2], near[-1]
+    price_extended = p2 < p1 if long else p2 > p1
+    if not price_extended:
+        return False
+    r1 = float(rsi_series.iloc[i1]) if i1 < n else 50.0
+    r2 = float(rsi_series.iloc[i2]) if i2 < n else 50.0
+    return r2 > r1 if long else r2 < r1
 
 
 def find_entry_signals(
@@ -685,13 +677,10 @@ def find_entry_signals(
 
         # RSI-дивергенция — триггер подтверждения разворота (только NORMAL-режим)
         divergence = False
-        if rsi_series is not None and not special:
+        if rsi_series is not None:
             divergence = _detect_rsi_divergence(df, rsi_series, direction, entry)
-            if REQUIRE_RSI_DIVERGENCE and not divergence:
+            if not special and REQUIRE_RSI_DIVERGENCE and not divergence:
                 continue
-        elif rsi_series is not None:
-            # спецрежим: считаем дивергенцию для отображения, но не блокируем
-            divergence = _detect_rsi_divergence(df, rsi_series, direction, entry)
 
         if recovery and crash_low is not None:
             sl      = crash_low * (1.0 - CRASH_SL_BUFFER / 100.0)
