@@ -371,6 +371,36 @@ def _check_correlation(pair: str, open_pairs: List[str]) -> bool:
 # ГЕНЕРАЦИЯ СИГНАЛОВ (Слои 1/2/3)
 # ============================================================
 
+def _layer1_passes(
+    direction: str,
+    htf_structure: Optional[str],
+    divergence: bool,
+    special: bool,
+) -> bool:
+    """HTF-structure gate + RSI-divergence requirement (Layer 1)."""
+    if not special and htf_structure is not None:
+        if htf_structure == "RANGE":
+            return False
+        if htf_structure != ("BULLISH" if direction == "LONG" else "BEARISH"):
+            return False
+    if not special and REQUIRE_RSI_DIVERGENCE and not divergence:
+        return False
+    return True
+
+
+def _layer3_passes(
+    pattern_confirmed: bool,
+    vol_spike: bool,
+    special: bool,
+) -> bool:
+    """Candle-pattern + volume gate (Layer 3)."""
+    if not special and REQUIRE_PATTERN and not pattern_confirmed:
+        return False
+    if not special and SIGNAL_VOLUME_MULT > 0 and not vol_spike:
+        return False
+    return True
+
+
 def find_entry_signals(
     df: pd.DataFrame,
     levels: List[Dict],
@@ -444,25 +474,18 @@ def find_entry_signals(
                 direction = "SHORT"
             else:
                 continue
-            if htf_structure is not None:
-                if htf_structure == "RANGE":
-                    continue
-                if htf_structure != ("BULLISH" if direction == "LONG" else "BEARISH"):
-                    continue
 
         entry = lvl["price"]
 
-        divergence = False
-        if rsi_series is not None:
-            divergence = _detect_rsi_divergence(df, rsi_series, direction, entry)
-            if not special and REQUIRE_RSI_DIVERGENCE and not divergence:
-                continue
-
-        expected_patterns = _BULLISH_PATTERNS if direction == "LONG" else _BEARISH_PATTERNS
-        pattern_confirmed = pattern in expected_patterns
-        if not special and REQUIRE_PATTERN and not pattern_confirmed:
+        divergence = (
+            _detect_rsi_divergence(df, rsi_series, direction, entry)
+            if rsi_series is not None else False
+        )
+        if not _layer1_passes(direction, htf_structure, divergence, special):
             continue
-        if not special and SIGNAL_VOLUME_MULT > 0 and not vol_spike:
+
+        pattern_confirmed = pattern in (_BULLISH_PATTERNS if direction == "LONG" else _BEARISH_PATTERNS)
+        if not _layer3_passes(pattern_confirmed, vol_spike, special):
             continue
 
         if recovery and crash_low is not None:
