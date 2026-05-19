@@ -56,8 +56,10 @@ def _calc_rsi_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
     loss  = -delta.where(delta < 0, 0.0)
     avg_g = gain.ewm(alpha=1.0 / period, adjust=False).mean()
     avg_l = loss.ewm(alpha=1.0 / period, adjust=False).mean()
-    rs    = avg_g / avg_l.replace(0, float("nan"))
-    return 100.0 - (100.0 / (1.0 + rs))
+    rs  = avg_g / avg_l.replace(0, float("nan"))
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    # When avg_l==0 but avg_g>0 the formula produces NaN; correct value is 100.
+    return rsi.where(~((avg_g > 0) & (avg_l == 0)), 100.0)
 
 
 def _calc_atr_ratio(df: pd.DataFrame, atr_period: int = 14, avg_period: int = 20) -> float:
