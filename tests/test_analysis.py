@@ -185,8 +185,8 @@ class TestAddConfluenceScores:
 # ── _detect_htf_structure ──────────────────────────────────────────────────────
 
 class TestDetectHtfStructure:
-    def _zigzag_df(self, rising: bool, n_swings: int = 6, swing_size: int = 10):
-        """Alternating up/down swings with each peak/trough higher (rising) or lower."""
+    def _zigzag_df(self, rising: bool, n_swings: int = 8, swing_size: int = 10):
+        """Alternating up/down swings each higher (rising) or lower to produce 3+ swing extrema."""
         prices = []
         base   = 100.0
         step   = swing_size if rising else -swing_size
@@ -205,6 +205,12 @@ class TestDetectHtfStructure:
     def test_bearish_structure(self):
         df = self._zigzag_df(rising=False)
         assert an._detect_htf_structure(df) == "BEARISH"
+
+    def test_single_reversal_returns_range(self):
+        """Two swing highs/lows is no longer enough — need 3."""
+        prices = [100, 105, 100, 108, 103]
+        df = make_df(prices, highs=[p + 1 for p in prices], lows=[p - 1 for p in prices])
+        assert an._detect_htf_structure(df) == "RANGE"
 
     def test_none_df_returns_range(self):
         assert an._detect_htf_structure(None) == "RANGE"
@@ -406,6 +412,68 @@ class TestFindEntrySignals:
                                       ema_period=200, regime="NORMAL")
         assert sigs == []
 
+    def test_htf_rsi_blocks_long_when_overbought(self):
+        """LONG blocked when 4h RSI > HTF_RSI_OVERBOUGHT."""
+        orig = an.REQUIRE_RSI_DIVERGENCE
+        an.REQUIRE_RSI_DIVERGENCE = False
+        df = self._bullish_df(300)
+        current = float(df["close"].iloc[-1])
+        levels = [
+            {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
+             "confluence_score": 1, "confluence_tags": ["EMA21"]},
+            {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
+             "confluence_score": 0, "confluence_tags": []},
+        ]
+        sigs = an.find_entry_signals(
+            df, levels, current_price=current,
+            htf_structure="BULLISH", adx_val=30.0, adx_min=20.0,
+            ema_period=50, regime="NORMAL", htf_rsi=75.0,
+        )
+        an.REQUIRE_RSI_DIVERGENCE = orig
+        assert all(s["direction"] != "LONG" for s in sigs)
+
+    def test_htf_rsi_blocks_short_when_oversold(self):
+        """SHORT blocked when 4h RSI < HTF_RSI_OVERSOLD."""
+        orig = an.REQUIRE_RSI_DIVERGENCE
+        an.REQUIRE_RSI_DIVERGENCE = False
+        df = make_df([float(130 - i * 0.1) for i in range(300)],
+                     highs=[float(130 - i * 0.1 + 1) for i in range(300)],
+                     lows=[float(130 - i * 0.1 - 1)  for i in range(300)])
+        current = float(df["close"].iloc[-1])
+        levels = [
+            {"price": round(current * 1.001, 2), "type": "RESISTANCE", "touches": 5,
+             "confluence_score": 1, "confluence_tags": ["EMA21"]},
+            {"price": round(current * 0.85, 2),  "type": "SUPPORT",    "touches": 3,
+             "confluence_score": 0, "confluence_tags": []},
+        ]
+        sigs = an.find_entry_signals(
+            df, levels, current_price=current,
+            htf_structure="BEARISH", adx_val=30.0, adx_min=20.0,
+            ema_period=50, regime="NORMAL", htf_rsi=25.0,
+        )
+        an.REQUIRE_RSI_DIVERGENCE = orig
+        assert all(s["direction"] != "SHORT" for s in sigs)
+
+    def test_htf_rsi_allows_signal_in_valid_range(self):
+        """Signal passes when 4h RSI is neutral (40–60)."""
+        orig = an.REQUIRE_RSI_DIVERGENCE
+        an.REQUIRE_RSI_DIVERGENCE = False
+        df = self._bullish_df(300)
+        current = float(df["close"].iloc[-1])
+        levels = [
+            {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
+             "confluence_score": 1, "confluence_tags": ["EMA21"]},
+            {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
+             "confluence_score": 0, "confluence_tags": []},
+        ]
+        sigs = an.find_entry_signals(
+            df, levels, current_price=current,
+            htf_structure="BULLISH", adx_val=30.0, adx_min=20.0,
+            ema_period=50, regime="NORMAL", htf_rsi=50.0,
+        )
+        an.REQUIRE_RSI_DIVERGENCE = orig
+        assert len(sigs) >= 1
+
     def test_adx_filter_blocks_ranging_market(self):
         df     = self._bullish_df()
         levels = [{"price": 130.0, "type": "SUPPORT", "touches": 5,
@@ -459,7 +527,7 @@ class TestFindEntrySignals:
         tp_price      = round(current * 1.15, 2)
         levels = [
             {"price": support_price, "type": "SUPPORT",    "touches": 5,
-             "confluence_score": 0, "confluence_tags": []},
+             "confluence_score": 1, "confluence_tags": ["EMA21"]},
             {"price": tp_price,      "type": "RESISTANCE", "touches": 3,
              "confluence_score": 0, "confluence_tags": []},
         ]

@@ -225,6 +225,8 @@ async def _run_position_checks(
         pair, h, l, candle_close=current_price, require_bounce=BOUNCE_CONFIRM,
     )
     if triggered:
+        for trade in triggered:
+            await send_msg(bot, fmt_trade_opened(trade))
         for trade in portfolio.check_breakeven(pair, h, l):
             await send_msg(bot, fmt_sl_to_breakeven(trade))
         portfolio.check_trailing_stop(pair, h, l)
@@ -246,6 +248,7 @@ class _PairAnalysis(NamedTuple):
     atr_ratio:     float
     regime:        str
     htf_structure: Optional[str]
+    htf_rsi:       Optional[float]
 
 
 async def _compute_analysis(
@@ -259,7 +262,7 @@ async def _compute_analysis(
     fvg_zones = _find_fvg_zones(df, FVG_LOOKBACK, FVG_MIN_GAP_PCT)
     _add_confluence_scores(levels, ema_lvls, fvg_zones, TOLERANCE_PERCENT)
 
-    htf_trend, htf_ema, htf_sr, htf_structure = await asyncio.to_thread(
+    htf_trend, htf_ema, htf_sr, htf_structure, htf_rsi = await asyncio.to_thread(
         _fetch_htf_confluence, client, pair,
     )
     if htf_sr:
@@ -275,9 +278,10 @@ async def _compute_analysis(
     pump_high  = _find_pump_high(df, PUMP_HIGH_LOOKBACK) if regime == "CORRECTION" else None
 
     logger.info(
-        "%s | HTF(%s)=%s  структура=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
+        "%s | HTF(%s)=%s  структура=%s  RSI4h=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
         pair, HTF_TIMEFRAME, htf_trend or "N/A",
         htf_structure or "N/A",
+        f"{htf_rsi:.1f}" if htf_rsi is not None else "N/A",
         f"{adx_val:.1f}" if adx_val is not None else "N/A",
         rsi_val, atr_ratio, regime,
     )
@@ -296,6 +300,7 @@ async def _compute_analysis(
         pump_high=pump_high,
         htf_structure=htf_structure,
         rsi_series=rsi_series,
+        htf_rsi=htf_rsi,
     )
     return _PairAnalysis(
         levels=levels, signals=signals,
@@ -303,6 +308,7 @@ async def _compute_analysis(
         adx_val=adx_val, rsi_val=rsi_val,
         atr_ratio=atr_ratio, regime=regime,
         htf_structure=htf_structure,
+        htf_rsi=htf_rsi,
     )
 
 
