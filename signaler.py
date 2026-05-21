@@ -302,6 +302,7 @@ async def _compute_analysis(
         htf_structure=htf_structure,
         rsi_series=rsi_series,
         htf_rsi=htf_rsi,
+        atr_ratio=atr_ratio,
     )
     return _PairAnalysis(
         levels=levels, signals=signals,

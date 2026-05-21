@@ -80,6 +80,9 @@ RUN_INTERVAL_HOURS       = float(os.getenv("RUN_INTERVAL_HOURS", "1.0"))
 SL_TP_CHECK_INTERVAL_MIN = int(os.getenv("SL_TP_CHECK_INTERVAL_MIN", "3"))
 COMMISSION_MAKER         = float(os.getenv("COMMISSION_MAKER", "0.0000"))
 COMMISSION_TAKER         = float(os.getenv("COMMISSION_TAKER", "0.0005"))
+CHOPPY_ADX_CONFIRM       = int(os.getenv("CHOPPY_ADX_CONFIRM", "4"))
+CHOPPY_ATR_MIN           = float(os.getenv("CHOPPY_ATR_MIN", "0.75"))
+RR_MAX                   = float(os.getenv("RR_MAX", "8.0"))
 BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.65"))
 
 TRAILING_STOP = os.getenv("TRAILING_STOP", "true").lower() == "true"

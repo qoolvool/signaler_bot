@@ -307,6 +307,7 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
         htf_trend=htf_trend, adx_val=adx_val, regime=regime,
         crash_low=crash_low, pump_high=pump_high,
         htf_structure=htf_structure, rsi_series=rsi_series, htf_rsi=htf_rsi,
+        atr_ratio=atr_ratio,
     )
     returns = df_1h["close"].pct_change().dropna().tail(CORR_LOOKBACK)
     return pair, signals, returns

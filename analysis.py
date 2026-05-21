@@ -20,8 +20,9 @@ from config import (
     REQUIRE_RSI_DIVERGENCE, REQUIRE_PATTERN, SIGNAL_VOLUME_MULT,
     CRASH_SL_BUFFER, PUMP_SL_BUFFER, HTF_SR_REQUIRE_CONFIRM,
     MIN_CONFLUENCE_SCORE, HTF_RSI_OVERBOUGHT, HTF_RSI_OVERSOLD,
+    CHOPPY_ADX_CONFIRM, CHOPPY_ATR_MIN, RR_MAX,
 )
-from indicators import _calc_ema, _calc_atr, _calc_rsi_series
+from indicators import _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series
 
 logger = logging.getLogger("signaler")
 
@@ -429,6 +430,7 @@ def find_entry_signals(
     htf_structure: Optional[str] = None,
     rsi_series: Optional[pd.Series] = None,
     htf_rsi: Optional[float] = None,
+    atr_ratio: float = 1.0,
 ) -> List[Dict]:
     if regime in ("CRASH", "PUMP"):
         return []
@@ -459,9 +461,22 @@ def find_entry_signals(
     correction = (regime == "CORRECTION")
     special    = recovery or correction
 
-    if not special and adx_val is not None and adx_min > 0 and adx_val < adx_min:
-        logger.info("ADX %.1f < %.1f — боковик, сигналы пропущены", adx_val, adx_min)
-        return []
+    if not special:
+        # ATR choppy filter: reject if current volatility is far below its average
+        if CHOPPY_ATR_MIN > 0 and atr_ratio < CHOPPY_ATR_MIN:
+            logger.info("ATR ratio %.2f < %.2f — слишком тихо, сигналы пропущены", atr_ratio, CHOPPY_ATR_MIN)
+            return []
+        # ADX persistence filter: require ADX ≥ adx_min for last N consecutive bars
+        if adx_min > 0 and CHOPPY_ADX_CONFIRM > 0:
+            adx_s = _calc_adx_series(df, atr_period)
+            if len(adx_s) >= CHOPPY_ADX_CONFIRM:
+                if float(adx_s.iloc[-CHOPPY_ADX_CONFIRM:].min()) < adx_min:
+                    logger.info("ADX choppy — min %.1f < %.1f за последние %d баров",
+                                float(adx_s.iloc[-CHOPPY_ADX_CONFIRM:].min()), adx_min, CHOPPY_ADX_CONFIRM)
+                    return []
+        elif adx_val is not None and adx_min > 0 and adx_val < adx_min:
+            logger.info("ADX %.1f < %.1f — боковик, сигналы пропущены", adx_val, adx_min)
+            return []
 
     signals = []
     for lvl in levels:
@@ -546,9 +561,13 @@ def find_entry_signals(
                 )
                 if above:
                     nearest = above[0]["price"]
-                    if nearest < entry + tp_min:
-                        continue
-                    tp = nearest
+                    nearest_rr = (nearest - entry) / sl_dist
+                    if nearest_rr >= min_rr:
+                        tp = nearest  # S/R meets RR — use it even if < ATR min
+                    elif nearest >= entry + tp_min:
+                        tp = nearest  # S/R beyond ATR min — use it
+                    else:
+                        continue  # S/R too close for minimum RR — skip
                 else:
                     tp = entry + tp_min
             else:
@@ -559,11 +578,22 @@ def find_entry_signals(
                 )
                 if below:
                     nearest = below[0]["price"]
-                    if nearest > entry - tp_min:
-                        continue
-                    tp = nearest
+                    nearest_rr = (entry - nearest) / sl_dist
+                    if nearest_rr >= min_rr:
+                        tp = nearest  # S/R meets RR — use it even if < ATR min
+                    elif nearest <= entry - tp_min:
+                        tp = nearest  # S/R beyond ATR min — use it
+                    else:
+                        continue  # S/R too close for minimum RR — skip
                 else:
                     tp = entry - tp_min
+
+        # Cap TP at RR_MAX to avoid unreachable targets (e.g. RR=31, 74)
+        if RR_MAX > 0 and sl_dist > 0:
+            if direction == "LONG":
+                tp = min(tp, entry + sl_dist * RR_MAX)
+            else:
+                tp = max(tp, entry - sl_dist * RR_MAX)
 
         tp_dist    = abs(tp - entry)
         rr         = round(tp_dist / sl_dist, 1) if sl_dist > 0 else None
