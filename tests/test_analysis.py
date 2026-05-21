@@ -291,9 +291,9 @@ class TestLayer1Passes:
         an.REQUIRE_RSI_DIVERGENCE = True
         assert an._layer1_passes("LONG", "RANGE", False, True) is True
 
-    def test_none_structure_skips_structure_gate(self):
+    def test_none_structure_blocks_like_range(self):
         an.REQUIRE_RSI_DIVERGENCE = False
-        assert an._layer1_passes("LONG", None, False, False) is True
+        assert an._layer1_passes("LONG", None, False, False) is False
 
 
 class TestLayer3Passes:

@@ -380,14 +380,20 @@ def _layer1_passes(
     divergence: bool,
     special: bool,
 ) -> bool:
-    """HTF-structure gate + RSI-divergence requirement (Layer 1)."""
-    if not special and htf_structure is not None:
-        if htf_structure == "RANGE":
+    """HTF-structure gate + RSI-divergence requirement (Layer 1).
+
+    None is treated the same as "RANGE" — no signals when 4h data is
+    unavailable; trading without HTF confirmation is not allowed.
+    """
+    if not special:
+        if htf_structure is None or htf_structure == "RANGE":
             return False
-        if htf_structure != ("BULLISH" if direction == "LONG" else "BEARISH"):
+        if htf_structure == "BULLISH" and direction != "LONG":
             return False
-    if not special and REQUIRE_RSI_DIVERGENCE and not divergence:
-        return False
+        if htf_structure == "BEARISH" and direction != "SHORT":
+            return False
+        if REQUIRE_RSI_DIVERGENCE and not divergence:
+            return False
     return True
 
 

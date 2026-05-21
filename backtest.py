@@ -199,6 +199,11 @@ def phase1_download(pairs: List[str], years: int = 4, force: bool = False) -> No
 # ============================================================
 
 class BacktestPortfolio(PaperPortfolio):
+    _sim_time: str = ""
+
+    def _utcnow(self) -> str:
+        return self._sim_time or super()._utcnow()
+
     def _connect_gsheets(self) -> None: pass
     def _load(self)          -> None: pass
     def _save(self)          -> None: pass
@@ -252,7 +257,6 @@ def _position_checks(
     if triggered:
         pf.check_breakeven(pair, high, low)
         pf.check_trailing_stop(pair, high, low)
-        closed.extend(pf.check_sl_tp(pair, high, low))
 
     return closed
 
@@ -374,6 +378,7 @@ def phase2_simulate(
 
     # ── Main loop ──────────────────────────────────────────────
     for ts in ts_iter:
+        pf._sim_time = ts.strftime("%Y-%m-%d %H:%M:%S UTC")
         prices: Dict[str, float] = {}
 
         for pair in active:
