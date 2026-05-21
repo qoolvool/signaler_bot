@@ -13,7 +13,8 @@ def _portfolio(**kwargs):
         max_open_trades=0,
         pending_expiry_checks=10,
         leverage=1,
-        commission_rate=0.0,
+        commission_maker=0.0,
+        commission_taker=0.0,
         breakeven_threshold=0.5,
         fixed_risk_mode=False,
         trailing_stop=False,
@@ -286,7 +287,7 @@ class TestCheckSlTp:
 
     def test_balance_updated_on_close(self):
         p = _portfolio(initial_balance=1000.0, trade_size_percent=10.0,
-                       commission_rate=0.0)
+                       commission_maker=0.0, commission_taker=0.0)
         self._open_trade(p, "LONG", entry=100.0, sl=90.0, tp=120.0)
         initial_bal = p.balance
         p.check_sl_tp("BTC/USDT", candle_high=121.0, candle_low=105.0)
@@ -299,7 +300,7 @@ class TestPnlCalculation:
     def test_long_pnl_correct(self):
         """$100 notional LONG from 100 to 110 → +10% → +$10."""
         p = _portfolio(initial_balance=1000.0, fixed_risk_mode=False,
-                       trade_size_percent=10.0, commission_rate=0.0)
+                       trade_size_percent=10.0, commission_maker=0.0, commission_taker=0.0)
         p.create_pending_order("BTC/USDT", "LONG", 100.0, sl=90.0, tp=120.0)
         p.check_pending_orders("BTC/USDT", candle_high=101, candle_low=99)
         trade = p.open_trades[0]
@@ -310,7 +311,7 @@ class TestPnlCalculation:
     def test_short_pnl_correct(self):
         """SHORT from 100 to 90 → +10% of notional."""
         p = _portfolio(initial_balance=1000.0, fixed_risk_mode=False,
-                       trade_size_percent=10.0, commission_rate=0.0)
+                       trade_size_percent=10.0, commission_maker=0.0, commission_taker=0.0)
         p.create_pending_order("BTC/USDT", "SHORT", 100.0, sl=110.0, tp=80.0)
         p.check_pending_orders("BTC/USDT", candle_high=101, candle_low=99)
         trade    = p.open_trades[0]
@@ -319,21 +320,32 @@ class TestPnlCalculation:
         assert result["pnl_usd"] == pytest.approx(notional * 0.1, rel=0.01)
 
     def test_commission_deducted(self):
+        # SL exit → taker rate charged; TP exit → maker rate (0.0) charged
         p = _portfolio(initial_balance=1000.0, fixed_risk_mode=False,
-                       trade_size_percent=10.0, commission_rate=0.001)
+                       trade_size_percent=10.0, commission_maker=0.0, commission_taker=0.001)
         p.create_pending_order("BTC/USDT", "LONG", 100.0, sl=90.0, tp=120.0)
         p.check_pending_orders("BTC/USDT", candle_high=101, candle_low=99)
         trade    = p.open_trades[0]
         notional = trade["notional"]
-        result   = p._close_trade(trade, 110.0, "TP")
-        expected = notional * 0.1 - notional * 0.001
+        # SL close: gross = notional * (90-100)/100, commission = taker only
+        result   = p._close_trade(trade, 90.0, "SL")
+        expected = notional * (-0.1) - notional * 0.001
         assert result["pnl_usd"] == pytest.approx(expected, rel=0.01)
+        # TP close: maker rate = 0.0, so no commission
+        p2 = _portfolio(initial_balance=1000.0, fixed_risk_mode=False,
+                        trade_size_percent=10.0, commission_maker=0.0, commission_taker=0.001)
+        p2.create_pending_order("BTC/USDT", "LONG", 100.0, sl=90.0, tp=120.0)
+        p2.check_pending_orders("BTC/USDT", candle_high=101, candle_low=99)
+        trade2   = p2.open_trades[0]
+        notional2 = trade2["notional"]
+        result2  = p2._close_trade(trade2, 110.0, "TP")
+        assert result2["pnl_usd"] == pytest.approx(notional2 * 0.1, rel=0.01)
 
     def test_leverage_amplifies_pnl(self):
         pnls = []
         for lev in (1, 10):
             p = _portfolio(leverage=lev, fixed_risk_mode=False,
-                           trade_size_percent=10.0, commission_rate=0.0)
+                           trade_size_percent=10.0, commission_maker=0.0, commission_taker=0.0)
             p.create_pending_order("BTC/USDT", "LONG", 100.0, sl=90.0, tp=120.0)
             p.check_pending_orders("BTC/USDT", candle_high=101, candle_low=99)
             t = p.open_trades[0]
@@ -343,7 +355,7 @@ class TestPnlCalculation:
 
     def test_sl_pnl_is_negative(self):
         p = _portfolio(fixed_risk_mode=False, trade_size_percent=10.0,
-                       commission_rate=0.0)
+                       commission_maker=0.0, commission_taker=0.0)
         p.create_pending_order("BTC/USDT", "LONG", 100.0, sl=90.0, tp=120.0)
         p.check_pending_orders("BTC/USDT", candle_high=101, candle_low=99)
         trade = p.open_trades[0]
@@ -363,7 +375,7 @@ class TestGetStats:
 
     def test_winrate_calculation(self):
         p = _portfolio(initial_balance=1000.0, fixed_risk_mode=False,
-                       trade_size_percent=5.0, commission_rate=0.0)
+                       trade_size_percent=5.0, commission_maker=0.0, commission_taker=0.0)
 
         def _trade(pair, direction, entry, sl, tp, h_close, l_close):
             p.create_pending_order(pair, direction, entry, sl=sl, tp=tp)
@@ -382,7 +394,7 @@ class TestGetStats:
 
     def test_get_equity_includes_unrealized(self):
         p = _portfolio(initial_balance=1000.0, fixed_risk_mode=False,
-                       trade_size_percent=10.0, commission_rate=0.0)
+                       trade_size_percent=10.0, commission_maker=0.0, commission_taker=0.0)
         p.create_pending_order("BTC/USDT", "LONG", 100.0, sl=90.0, tp=120.0)
         p.check_pending_orders("BTC/USDT", candle_high=101, candle_low=99)
         notional = p.open_trades[0]["notional"]

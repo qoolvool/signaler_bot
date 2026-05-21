@@ -78,7 +78,8 @@ CRASH_RESUME_ATR_RATIO = float(os.getenv("CRASH_RESUME_ATR_RATIO", "2.0"))
 DELAY_BETWEEN_PAIRS      = int(os.getenv("DELAY_BETWEEN_PAIRS", "2"))
 RUN_INTERVAL_HOURS       = float(os.getenv("RUN_INTERVAL_HOURS", "1.0"))
 SL_TP_CHECK_INTERVAL_MIN = int(os.getenv("SL_TP_CHECK_INTERVAL_MIN", "3"))
-COMMISSION_RATE          = float(os.getenv("COMMISSION_RATE", "0.001"))
+COMMISSION_MAKER         = float(os.getenv("COMMISSION_MAKER", "0.0000"))
+COMMISSION_TAKER         = float(os.getenv("COMMISSION_TAKER", "0.0005"))
 BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.65"))
 
 TRAILING_STOP = os.getenv("TRAILING_STOP", "true").lower() == "true"
@@ -99,8 +100,11 @@ EMA_CONFLUENCE_PERIODS = [
 FVG_LOOKBACK   = int(os.getenv("FVG_LOOKBACK", "50"))
 FVG_MIN_GAP_PCT = float(os.getenv("FVG_MIN_GAP_PCT", "0.1"))
 
-REQUIRE_PATTERN    = os.getenv("REQUIRE_PATTERN", "false").lower() == "true"
-SIGNAL_VOLUME_MULT = float(os.getenv("SIGNAL_VOLUME_MULT", "0"))
+REQUIRE_PATTERN      = os.getenv("REQUIRE_PATTERN", "false").lower() == "true"
+SIGNAL_VOLUME_MULT   = float(os.getenv("SIGNAL_VOLUME_MULT", "0"))
+MIN_CONFLUENCE_SCORE   = int(os.getenv("MIN_CONFLUENCE_SCORE", "1"))
+HTF_RSI_OVERBOUGHT     = float(os.getenv("HTF_RSI_OVERBOUGHT", "65"))
+HTF_RSI_OVERSOLD       = float(os.getenv("HTF_RSI_OVERSOLD",   "35"))
 
 CORR_LOOKBACK = int(os.getenv("CORR_LOOKBACK", "48"))
 CORR_MAX      = float(os.getenv("CORR_MAX", "0.75"))
@@ -108,7 +112,7 @@ CORR_MAX      = float(os.getenv("CORR_MAX", "0.75"))
 INITIAL_BALANCE       = float(os.getenv("INITIAL_BALANCE", "1000"))
 TRADE_SIZE_PERCENT    = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
 MAX_OPEN_TRADES       = int(os.getenv("MAX_OPEN_TRADES", "0"))
-PENDING_EXPIRY_CHECKS = int(os.getenv("PENDING_EXPIRY_CHECKS", "99999"))
+PENDING_EXPIRY_CHECKS = int(os.getenv("PENDING_EXPIRY_CHECKS", "96"))
 LEVERAGE              = int(os.getenv("LEVERAGE", "10"))
 
 logger = logging.getLogger("signaler")

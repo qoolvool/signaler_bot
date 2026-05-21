@@ -55,7 +55,8 @@ class PaperPortfolio:
         max_open_trades: int = 5,
         pending_expiry_checks: int = 8,
         leverage: int = 1,
-        commission_rate: float = 0.001,
+        commission_maker: float = 0.0,
+        commission_taker: float = 0.0005,
         breakeven_threshold: float = 0.5,
         fixed_risk_mode: bool = True,
         risk_per_trade_percent: float = 1.0,
@@ -68,7 +69,8 @@ class PaperPortfolio:
         self.max_open_trades        = max_open_trades
         self.pending_expiry_checks  = pending_expiry_checks
         self.leverage               = leverage
-        self.commission_rate        = commission_rate
+        self.commission_maker       = commission_maker
+        self.commission_taker       = commission_taker
         self.breakeven_threshold    = breakeven_threshold
         self.fixed_risk_mode        = fixed_risk_mode
         self.risk_per_trade_percent = risk_per_trade_percent
@@ -92,6 +94,10 @@ class PaperPortfolio:
 
         self._connect_gsheets()
         self._load()
+
+    def _utcnow(self) -> str:
+        """Current UTC timestamp string. Override in subclasses (e.g. backtesting)."""
+        return _utcnow()
 
     # ── Google Sheets connection ──────────────────────────────────────────────
 
@@ -232,7 +238,7 @@ class PaperPortfolio:
                 self.orders_created,
                 self.orders_cancelled,
                 json.dumps(self.pending_orders, ensure_ascii=False),
-                _utcnow(),
+                self._utcnow(),
             ]])
             # Trades: full rewrite only when something changed
             if self._trades_dirty:
@@ -289,7 +295,7 @@ class PaperPortfolio:
                     "pending_orders":   self.pending_orders,
                     "orders_created":   self.orders_created,
                     "orders_cancelled": self.orders_cancelled,
-                    "updated_at":       _utcnow(),
+                    "updated_at":       self._utcnow(),
                 }, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
@@ -401,7 +407,7 @@ class PaperPortfolio:
             "reward_pct":       reward_pct,
             "rr":               rr,
             "trail_dist":       trail_dist,
-            "created_at":       _utcnow(),
+            "created_at":       self._utcnow(),
             "checks_remaining": self.pending_expiry_checks,
         }
         self.pending_orders.append(order)
@@ -481,7 +487,7 @@ class PaperPortfolio:
             "risk_pct":        order["risk_pct"],
             "reward_pct":      order["reward_pct"],
             "rr":              order["rr"],
-            "opened_at":       _utcnow(),
+            "opened_at":       self._utcnow(),
             "closed_at":       None,
             "close_price":     None,
             "close_reason":    None,
@@ -628,7 +634,7 @@ class PaperPortfolio:
                 trade["id"], entry, size_usd,
             )
             trade.update(
-                status="CLOSED", closed_at=_utcnow(), close_price=close_price,
+                status="CLOSED", closed_at=self._utcnow(), close_price=close_price,
                 close_reason=reason, pnl_usd=0.0, pnl_percent=0.0,
             )
             self._trades_dirty = True
@@ -638,12 +644,12 @@ class PaperPortfolio:
             pnl = (close_price - entry) / entry * notional
         else:
             pnl = (entry - close_price) / entry * notional
-        # Комиссия: 0.1% round-trip от notional (открытие + закрытие одной ставкой)
-        commission = round(notional * self.commission_rate, 4)
+        exit_rate  = self.commission_taker if reason == "SL" else self.commission_maker
+        commission = round(notional * (self.commission_maker + exit_rate), 4)
         pnl -= commission
         pnl_pct = pnl / size_usd * 100
         trade.update(
-            status="CLOSED", closed_at=_utcnow(), close_price=close_price,
+            status="CLOSED", closed_at=self._utcnow(), close_price=close_price,
             close_reason=reason, pnl_usd=round(pnl, 2), pnl_percent=round(pnl_pct, 2),
             commission=commission,
         )
@@ -667,7 +673,7 @@ class PaperPortfolio:
                     cell = self._ws_reports.find(pair, in_column=1)
                 except Exception:
                     pass
-                row = [pair, text, _utcnow()]
+                row = [pair, text, self._utcnow()]
                 if cell:
                     self._ws_reports.update(f"A{cell.row}", [row])
                 else:
@@ -675,7 +681,7 @@ class PaperPortfolio:
             except Exception as exc:
                 logger.error("Ошибка сохранения отчёта %s: %s", pair, exc)
         else:
-            self.reports[pair] = {"pair": pair, "text": text, "saved_at": _utcnow()}
+            self.reports[pair] = {"pair": pair, "text": text, "saved_at": self._utcnow()}
             try:
                 REPORTS_FILE.write_text(
                     json.dumps(self.reports, indent=2, ensure_ascii=False),

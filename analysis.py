@@ -19,8 +19,9 @@ from config import (
     HTF_TIMEFRAME, HTF_EMA_PERIOD, HTF_SR_CANDLES, HTF_STRUCTURE_WINDOW,
     REQUIRE_RSI_DIVERGENCE, REQUIRE_PATTERN, SIGNAL_VOLUME_MULT,
     CRASH_SL_BUFFER, PUMP_SL_BUFFER, HTF_SR_REQUIRE_CONFIRM,
+    MIN_CONFLUENCE_SCORE, HTF_RSI_OVERBOUGHT, HTF_RSI_OVERSOLD,
 )
-from indicators import _calc_ema, _calc_atr
+from indicators import _calc_ema, _calc_atr, _calc_rsi_series
 
 logger = logging.getLogger("signaler")
 
@@ -233,41 +234,43 @@ def find_support_resistance(
 # ============================================================
 
 def _detect_htf_structure(df: pd.DataFrame, window: int = HTF_STRUCTURE_WINDOW) -> str:
-    if df is None or len(df) < window * 4 + 1:
+    if df is None or len(df) < window * 6 + 1:
         return "RANGE"
     highs = _find_local_extrema(df["high"], window, "max")
     lows  = _find_local_extrema(df["low"],  window, "min")
-    if len(highs) < 2 or len(lows) < 2:
+    if len(highs) < 3 or len(lows) < 3:
         return "RANGE"
-    h_prev, h_last = highs[-2][0], highs[-1][0]
-    l_prev, l_last = lows[-2][0],  lows[-1][0]
-    if h_last > h_prev and l_last > l_prev:
+    h2, h1, h0 = highs[-3][0], highs[-2][0], highs[-1][0]
+    l2, l1, l0 = lows[-3][0],  lows[-2][0],  lows[-1][0]
+    if h0 > h1 > h2 and l0 > l1 > l2:
         return "BULLISH"
-    if h_last < h_prev and l_last < l_prev:
+    if h0 < h1 < h2 and l0 < l1 < l2:
         return "BEARISH"
     return "RANGE"
 
 
 def _fetch_htf_confluence(client, pair: str):
-    """Один запрос HTF_TIMEFRAME → (trend, ema, sr_levels, structure)."""
+    """Один запрос HTF_TIMEFRAME → (trend, ema, sr_levels, structure, htf_rsi)."""
     try:
         needed = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
         raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=needed)
         if not raw or len(raw) < HTF_EMA_PERIOD:
-            return None, None, [], "RANGE"
+            return None, None, [], "RANGE", None
         df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
         closes    = df_htf["close"].astype(float)
         ema       = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
         trend     = "UP" if float(closes.iloc[-1]) > ema else "DOWN"
         structure = _detect_htf_structure(df_htf)
+        rsi_raw   = float(_calc_rsi_series(df_htf).iloc[-1])
+        htf_rsi   = rsi_raw if not pd.isna(rsi_raw) else None
         htf_sr: List[Dict] = []
         if HTF_SR_CANDLES > 0 and len(df_htf) >= EXTREMA_WINDOW * 2 + 1:
             htf_sr = find_support_resistance(df_htf)
-        return trend, round(ema, 8), htf_sr, structure
+        return trend, round(ema, 8), htf_sr, structure, htf_rsi
     except Exception as exc:
         logger.warning("Ошибка HTF анализа %s: %s", pair, exc)
-        return None, None, [], "RANGE"
+        return None, None, [], "RANGE", None
 
 
 def _mark_htf_confirmed(
@@ -377,14 +380,20 @@ def _layer1_passes(
     divergence: bool,
     special: bool,
 ) -> bool:
-    """HTF-structure gate + RSI-divergence requirement (Layer 1)."""
-    if not special and htf_structure is not None:
-        if htf_structure == "RANGE":
+    """HTF-structure gate + RSI-divergence requirement (Layer 1).
+
+    None is treated the same as "RANGE" — no signals when 4h data is
+    unavailable; trading without HTF confirmation is not allowed.
+    """
+    if not special:
+        if htf_structure is None or htf_structure == "RANGE":
             return False
-        if htf_structure != ("BULLISH" if direction == "LONG" else "BEARISH"):
+        if htf_structure == "BULLISH" and direction != "LONG":
             return False
-    if not special and REQUIRE_RSI_DIVERGENCE and not divergence:
-        return False
+        if htf_structure == "BEARISH" and direction != "SHORT":
+            return False
+        if REQUIRE_RSI_DIVERGENCE and not divergence:
+            return False
     return True
 
 
@@ -419,6 +428,7 @@ def find_entry_signals(
     pump_high: Optional[float] = None,
     htf_structure: Optional[str] = None,
     rsi_series: Optional[pd.Series] = None,
+    htf_rsi: Optional[float] = None,
 ) -> List[Dict]:
     if regime in ("CRASH", "PUMP"):
         return []
@@ -459,6 +469,9 @@ def find_entry_signals(
         if distance > proximity:
             continue
 
+        if not special and lvl.get("confluence_score", 0) < MIN_CONFLUENCE_SCORE:
+            continue
+
         if recovery:
             if lvl["type"] != "SUPPORT":
                 continue
@@ -476,6 +489,12 @@ def find_entry_signals(
                 continue
 
         entry = lvl["price"]
+
+        if not special and htf_rsi is not None:
+            if direction == "LONG"  and htf_rsi > HTF_RSI_OVERBOUGHT:
+                continue
+            if direction == "SHORT" and htf_rsi < HTF_RSI_OVERSOLD:
+                continue
 
         divergence = (
             _detect_rsi_divergence(df, rsi_series, direction, entry)
