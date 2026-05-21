@@ -12,7 +12,7 @@ def _portfolio(**kwargs):
         max_open_trades=0,
         pending_expiry_checks=10,
         leverage=1,
-        commission_rate=0.0,
+        commission_maker=0.0, commission_taker=0.0,
         breakeven_threshold=0.5,
         fixed_risk_mode=False,
         trailing_stop=False,
@@ -166,7 +166,7 @@ class TestCloseTradeCorruptEntry:
 
 class TestEquityNotionalFallback:
     def test_uses_size_usd_when_notional_absent(self):
-        p = _portfolio(initial_balance=1000.0, commission_rate=0.0)
+        p = _portfolio(initial_balance=1000.0, commission_maker=0.0, commission_taker=0.0)
         # Manually inject an open trade without "notional" key
         trade = {
             "id": "T1", "pair": "BTC/USDT", "direction": "LONG",
@@ -204,7 +204,7 @@ class TestShortBreakevenEquality:
     def test_sl_already_at_entry_marks_breakeven_but_not_in_moved(self):
         # entry=sl initially; breakeven threshold reached; sl_at_breakeven flips
         # but new_sl = min(entry, entry) == trade["sl"] → not added to moved
-        p = _portfolio(breakeven_threshold=0.5, commission_rate=0.0)
+        p = _portfolio(breakeven_threshold=0.5, commission_maker=0.0, commission_taker=0.0)
         _open_trade(p, "BTC/USDT", "SHORT", entry=100.0, sl=100.0, tp=80.0)
         trade = p.open_trades[0]
 
@@ -219,7 +219,7 @@ class TestShortBreakevenEquality:
 class TestLongTrailingEquality:
     def test_sl_not_in_moved_when_new_sl_equals_current(self):
         # trail_dist is large enough that new_sl < current_sl → no update
-        p = _portfolio(trailing_stop=True, trailing_mult=100.0, commission_rate=0.0)
+        p = _portfolio(trailing_stop=True, trailing_mult=100.0, commission_maker=0.0, commission_taker=0.0)
         _open_trade(p, "BTC/USDT", "LONG", entry=100.0, sl=90.0, tp=130.0)
         trade = p.open_trades[0]
         # trail_dist = |100 - 90| * 100 = 1000 — so new_sl = peak - 1000 << current sl

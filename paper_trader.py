@@ -55,7 +55,8 @@ class PaperPortfolio:
         max_open_trades: int = 5,
         pending_expiry_checks: int = 8,
         leverage: int = 1,
-        commission_rate: float = 0.001,
+        commission_maker: float = 0.0,
+        commission_taker: float = 0.0005,
         breakeven_threshold: float = 0.5,
         fixed_risk_mode: bool = True,
         risk_per_trade_percent: float = 1.0,
@@ -68,7 +69,8 @@ class PaperPortfolio:
         self.max_open_trades        = max_open_trades
         self.pending_expiry_checks  = pending_expiry_checks
         self.leverage               = leverage
-        self.commission_rate        = commission_rate
+        self.commission_maker       = commission_maker
+        self.commission_taker       = commission_taker
         self.breakeven_threshold    = breakeven_threshold
         self.fixed_risk_mode        = fixed_risk_mode
         self.risk_per_trade_percent = risk_per_trade_percent
@@ -642,8 +644,8 @@ class PaperPortfolio:
             pnl = (close_price - entry) / entry * notional
         else:
             pnl = (entry - close_price) / entry * notional
-        # Комиссия: 0.1% round-trip от notional (открытие + закрытие одной ставкой)
-        commission = round(notional * self.commission_rate, 4)
+        exit_rate  = self.commission_taker if reason == "SL" else self.commission_maker
+        commission = round(notional * (self.commission_maker + exit_rate), 4)
         pnl -= commission
         pnl_pct = pnl / size_usd * 100
         trade.update(

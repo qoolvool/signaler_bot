@@ -53,7 +53,7 @@ from config import (
     ATR_PERIOD, SL_ATR_MULT, TP_ATR_MIN_MULT, MIN_RR,
     HTF_TIMEFRAME, HTF_EMA_PERIOD, ADX_PERIOD, ADX_MIN,
     RSI_PERIOD, CRASH_LOW_LOOKBACK, PUMP_HIGH_LOOKBACK,
-    COMMISSION_RATE, BREAKEVEN_THRESHOLD, TRAILING_STOP, TRAILING_MULT,
+    COMMISSION_MAKER, COMMISSION_TAKER, BREAKEVEN_THRESHOLD, TRAILING_STOP, TRAILING_MULT,
     BOUNCE_CONFIRM, FIXED_RISK_MODE, RISK_PER_TRADE_PERCENT,
     MAX_TRADE_SIZE_PERCENT, HTF_SR_CANDLES, HTF_SR_REQUIRE_CONFIRM,
     EMA_CONFLUENCE_PERIODS, FVG_LOOKBACK, FVG_MIN_GAP_PCT,
@@ -356,7 +356,8 @@ def phase2_simulate(
         max_open_trades        = MAX_OPEN_TRADES,
         pending_expiry_checks  = PENDING_EXPIRY_CHECKS,
         leverage               = LEVERAGE,
-        commission_rate        = COMMISSION_RATE,
+        commission_maker       = COMMISSION_MAKER,
+        commission_taker       = COMMISSION_TAKER,
         breakeven_threshold    = BREAKEVEN_THRESHOLD,
         fixed_risk_mode        = FIXED_RISK_MODE,
         risk_per_trade_percent = RISK_PER_TRADE_PERCENT,
@@ -795,7 +796,7 @@ def _generate_html(
   Initial balance: <b>${b['initial']:,.2f}</b> &nbsp;·&nbsp;
   Leverage: <b>{LEVERAGE}×</b> &nbsp;·&nbsp;
   Risk/trade: <b>{RISK_PER_TRADE_PERCENT}%</b> &nbsp;·&nbsp;
-  Commission: <b>{COMMISSION_RATE*100:.2f}%</b>
+  Commission: maker <b>{COMMISSION_MAKER*100:.2f}%</b> / taker <b>{COMMISSION_TAKER*100:.3f}%</b>
 </div>
 
 <div class="summary">{cards}</div>

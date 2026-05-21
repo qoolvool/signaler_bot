@@ -97,7 +97,8 @@ portfolio = PaperPortfolio(
     max_open_trades=MAX_OPEN_TRADES,
     pending_expiry_checks=PENDING_EXPIRY_CHECKS,
     leverage=LEVERAGE,
-    commission_rate=COMMISSION_RATE,
+    commission_maker=COMMISSION_MAKER,
+    commission_taker=COMMISSION_TAKER,
     breakeven_threshold=BREAKEVEN_THRESHOLD,
     fixed_risk_mode=FIXED_RISK_MODE,
     risk_per_trade_percent=RISK_PER_TRADE_PERCENT,
@@ -549,7 +550,7 @@ async def post_init(app: Application) -> None:
         f"{'Риск' if FIXED_RISK_MODE else 'Маржа'}/сделку: "
         f"<b>{RISK_PER_TRADE_PERCENT if FIXED_RISK_MODE else TRADE_SIZE_PERCENT}%</b>  •  "
         f"Плечо: <b>{LEVERAGE}×</b>  •  Max: {MAX_OPEN_TRADES}\n"
-        f"Комиссия: <b>{COMMISSION_RATE*100:.2f}%</b> round-trip  •  "
+        f"Комиссия: maker <b>{COMMISSION_MAKER*100:.2f}%</b> / taker <b>{COMMISSION_TAKER*100:.3f}%</b>  •  "
         f"Безубыток при <b>{int(BREAKEVEN_THRESHOLD*100)}%</b> пути к TP\n"
         f"Трейлинг: {'✓ ×' + str(TRAILING_MULT) if TRAILING_STOP else '✗'}  •  "
         f"Отскок: {'✓' if BOUNCE_CONFIRM else '✗'}\n"
