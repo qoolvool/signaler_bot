@@ -25,8 +25,11 @@ Results:
 import argparse
 import json
 import logging
+import multiprocessing
+import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -91,6 +94,14 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 # ── Binance (public endpoint, no API key required) ───────────────────────────
 def _binance() -> ccxt.binance:
     return ccxt.binance({"enableRateLimit": True})
+
+
+from contextlib import contextmanager
+
+@contextmanager
+def _null_ctx():
+    """No-op context manager used in place of ProcessPoolExecutor when workers=1."""
+    yield None
 
 
 # ============================================================
@@ -262,6 +273,46 @@ def _position_checks(
 
 
 # ============================================================
+# PARALLEL ANALYSIS WORKER
+# ============================================================
+
+def _analyse_pair_worker(args: Tuple) -> Tuple:
+    """
+    Pure-function analysis for one pair slice.
+    Runs in a worker process — no shared portfolio state.
+    Returns (pair, signals, returns_series).
+    """
+    pair, df_1h, df_4h = args
+    htf_trend, htf_ema, htf_sr, htf_structure, htf_rsi = _htf_from_df(df_4h)
+    levels    = find_support_resistance(df_1h)
+    ema_lvls  = _calc_ema_levels(df_1h, EMA_CONFLUENCE_PERIODS)
+    fvg_zones = _find_fvg_zones(df_1h, FVG_LOOKBACK, FVG_MIN_GAP_PCT)
+    _add_confluence_scores(levels, ema_lvls, fvg_zones, TOLERANCE_PERCENT)
+    if htf_sr:
+        _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
+    adx_val, _, _ = _calc_adx(df_1h, ADX_PERIOD)
+    rsi_series    = _calc_rsi_series(df_1h, RSI_PERIOD)
+    atr_ratio     = _calc_atr_ratio(df_1h, ATR_PERIOD)
+    regime        = _detect_regime(rsi_series, atr_ratio)
+    crash_low     = _find_crash_low(df_1h, CRASH_LOW_LOOKBACK) if regime == "RECOVERY"   else None
+    pump_high     = _find_pump_high(df_1h, PUMP_HIGH_LOOKBACK) if regime == "CORRECTION" else None
+    c             = float(df_1h.iloc[-1]["close"])
+    signal_levels = (
+        [lv for lv in levels if lv.get("htf_confirmed")]
+        if HTF_SR_REQUIRE_CONFIRM and htf_sr
+        else levels
+    )
+    signals = find_entry_signals(
+        df_1h, signal_levels, c,
+        htf_trend=htf_trend, adx_val=adx_val, regime=regime,
+        crash_low=crash_low, pump_high=pump_high,
+        htf_structure=htf_structure, rsi_series=rsi_series, htf_rsi=htf_rsi,
+    )
+    returns = df_1h["close"].pct_change().dropna().tail(CORR_LOOKBACK)
+    return pair, signals, returns
+
+
+# ============================================================
 # ORDER PLACEMENT (mirrors signaler._apply_orders)
 # ============================================================
 
@@ -317,10 +368,12 @@ def _apply_orders(pf: BacktestPortfolio, pair: str, signals: List[Dict]) -> None
 def phase2_simulate(
     pairs: List[str],
     analysis_interval_h: int = 4,
+    workers: int = 0,
 ) -> Tuple[BacktestPortfolio, List[Dict]]:
     """
     Walk-forward simulation.
     Returns (portfolio, equity_log).
+    workers=0 → auto (min(pairs, cpu_count)); workers=1 → single-process.
     """
     # ── Load cached data ──────────────────────────────────────
     logger.info("=== PHASE 2: Loading data ===")
@@ -349,6 +402,19 @@ def phase2_simulate(
     logger.info("Timeline: %d hourly steps  %s → %s\n",
                 len(all_ts), all_ts[0].date(), all_ts[-1].date())
 
+    # ── Pre-build O(1) timestamp→position maps ────────────────
+    # Avoids repeated loc[:ts] binary search on every candle (420k+ calls)
+    ts_pos_1h: Dict[str, Dict] = {
+        p: {ts: i for i, ts in enumerate(data_1h[p].index)}
+        for p in active
+    }
+    # For 4h we use searchsorted (timestamps don't align with 1h grid)
+    idx_4h: Dict[str, pd.DatetimeIndex] = {
+        p: data_4h[p].index
+        for p in active if data_4h.get(p) is not None
+    }
+    HTF_TAIL = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
+
     # ── Portfolio ──────────────────────────────────────────────
     pf = BacktestPortfolio(
         initial_balance        = INITIAL_BALANCE,
@@ -368,7 +434,12 @@ def phase2_simulate(
 
     equity_log: List[Dict]       = []
     last_analysis: Dict[str, Optional[pd.Timestamp]] = {p: None for p in active}
-    MIN_BARS = EXTREMA_WINDOW * 2 + 5
+    MIN_BARS          = EXTREMA_WINDOW * 2 + 5
+    analysis_interval = pd.Timedelta(hours=analysis_interval_h)
+
+    n_workers = workers or min(len(active), os.cpu_count() or 4)
+    use_pool  = n_workers > 1
+    logger.info("Workers: %d  (use_pool=%s)", n_workers, use_pool)
 
     # ── Progress bar (optional) ────────────────────────────────
     try:
@@ -377,95 +448,67 @@ def phase2_simulate(
     except ImportError:
         ts_iter = all_ts
 
+    def _slice_1h(pair: str, ts: pd.Timestamp) -> Optional[pd.DataFrame]:
+        pos = ts_pos_1h[pair].get(ts)
+        if pos is None:
+            return None
+        start = max(0, pos - CANDLES_LIMIT + 1)
+        return data_1h[pair].iloc[start:pos + 1]
+
+    def _slice_4h(pair: str, ts: pd.Timestamp) -> Optional[pd.DataFrame]:
+        idx = idx_4h.get(pair)
+        if idx is None:
+            return None
+        pos = int(idx.searchsorted(ts, side="right")) - 1
+        if pos < 0:
+            return None
+        start = max(0, pos - HTF_TAIL + 1)
+        sliced = data_4h[pair].iloc[start:pos + 1]
+        return sliced if len(sliced) >= HTF_EMA_PERIOD else None
+
     # ── Main loop ──────────────────────────────────────────────
-    for ts in ts_iter:
-        pf._sim_time = ts.strftime("%Y-%m-%d %H:%M:%S UTC")
-        prices: Dict[str, float] = {}
+    with (ProcessPoolExecutor(max_workers=n_workers) if use_pool else _null_ctx()) as pool:
+        for ts in ts_iter:
+            pf._sim_time = ts.strftime("%Y-%m-%d %H:%M:%S UTC")
+            prices: Dict[str, float] = {}
+            analysis_tasks: List[Tuple] = []
 
-        for pair in active:
-            df_full = data_1h[pair]
-            if ts not in df_full.index:
-                continue
+            # Pass 1: position checks (sequential — touches shared portfolio)
+            for pair in active:
+                df = _slice_1h(pair, ts)
+                if df is None or len(df) < MIN_BARS:
+                    continue
+                candle = df.iloc[-1]
+                h = float(candle["high"])
+                l = float(candle["low"])
+                c = float(candle["close"])
+                prices[pair] = c
+                _position_checks(pf, pair, h, l, c)
 
-            # Candles UP TO current timestamp — zero look-ahead
-            df = df_full.loc[:ts].tail(CANDLES_LIMIT)
-            if len(df) < MIN_BARS:
-                continue
+                # Schedule analysis if interval elapsed
+                last = last_analysis[pair]
+                if last is not None and (ts - last) < analysis_interval:
+                    continue
+                last_analysis[pair] = ts
+                analysis_tasks.append((pair, df, _slice_4h(pair, ts)))
 
-            candle = df.iloc[-1]
-            h, l, c = float(candle["high"]), float(candle["low"]), float(candle["close"])
-            prices[pair] = c
+            # Pass 2: run analysis in parallel, apply orders sequentially
+            if analysis_tasks:
+                if use_pool:
+                    results = pool.map(_analyse_pair_worker, analysis_tasks)
+                else:
+                    results = map(_analyse_pair_worker, analysis_tasks)
+                for pair, signals, returns in results:
+                    _returns_cache[pair] = returns
+                    _apply_orders(pf, pair, signals)
 
-            # Update correlation returns cache (same dict used by analysis.py)
-            _returns_cache[pair] = df["close"].pct_change().dropna().tail(CORR_LOOKBACK)
-
-            # ── Position checks every candle ───────────────────
-            _position_checks(pf, pair, h, l, c)
-
-            # ── Analysis every analysis_interval_h ────────────
-            last = last_analysis[pair]
-            if last is not None and (ts - last) < pd.Timedelta(hours=analysis_interval_h):
-                continue
-            last_analysis[pair] = ts
-
-            # 4h slice (no look-ahead)
-            df_4h: Optional[pd.DataFrame] = None
-            raw_4h = data_4h.get(pair)
-            if raw_4h is not None:
-                sliced = raw_4h.loc[:ts].tail(max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30))
-                if len(sliced) >= HTF_EMA_PERIOD:
-                    df_4h = sliced
-
-            # HTF confluence
-            htf_trend, htf_ema, htf_sr, htf_structure, htf_rsi = _htf_from_df(df_4h)
-
-            # S/R levels
-            levels = find_support_resistance(df)
-
-            # Confluence scoring
-            ema_lvls  = _calc_ema_levels(df, EMA_CONFLUENCE_PERIODS)
-            fvg_zones = _find_fvg_zones(df, FVG_LOOKBACK, FVG_MIN_GAP_PCT)
-            _add_confluence_scores(levels, ema_lvls, fvg_zones, TOLERANCE_PERCENT)
-            if htf_sr:
-                _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
-
-            # Indicators
-            adx_val, _, _ = _calc_adx(df, ADX_PERIOD)
-            rsi_series    = _calc_rsi_series(df, RSI_PERIOD)
-            rsi_raw       = float(rsi_series.iloc[-1])
-            rsi_val       = rsi_raw if not np.isnan(rsi_raw) else 50.0
-            atr_ratio     = _calc_atr_ratio(df, ATR_PERIOD)
-            regime        = _detect_regime(rsi_series, atr_ratio)
-            crash_low     = _find_crash_low(df, CRASH_LOW_LOOKBACK) if regime == "RECOVERY"   else None
-            pump_high     = _find_pump_high(df, PUMP_HIGH_LOOKBACK) if regime == "CORRECTION" else None
-
-            signal_levels = (
-                [lv for lv in levels if lv.get("htf_confirmed")]
-                if HTF_SR_REQUIRE_CONFIRM and htf_sr
-                else levels
-            )
-
-            signals = find_entry_signals(
-                df, signal_levels, c,
-                htf_trend    = htf_trend,
-                adx_val      = adx_val,
-                regime       = regime,
-                crash_low    = crash_low,
-                pump_high    = pump_high,
-                htf_structure= htf_structure,
-                rsi_series   = rsi_series,
-                htf_rsi      = htf_rsi,
-            )
-
-            _apply_orders(pf, pair, signals)
-
-        # Equity snapshot
-        pf._live_prices.update(prices)
-        equity_log.append({
-            "timestamp": ts.isoformat(),
-            "equity":    pf.get_equity(prices),
-            "balance":   pf.balance,
-        })
+            # Equity snapshot
+            pf._live_prices.update(prices)
+            equity_log.append({
+                "timestamp": ts.isoformat(),
+                "equity":    pf.get_equity(prices),
+                "balance":   pf.balance,
+            })
 
     logger.info("\n=== PHASE 2 complete: %d closed / %d open trades ===\n",
                 len(pf.closed_trades), len(pf.open_trades))
@@ -906,6 +949,8 @@ def main() -> None:
                     help="Analysis interval in hours (default: 4; use 1 for max fidelity)")
     ap.add_argument("--pairs",    type=str, default=None,
                     help="Comma-separated pairs, e.g. BTC/USDT,ETH/USDT")
+    ap.add_argument("--workers",  type=int, default=0,
+                    help="Parallel workers for analysis (default: 0 = auto; 1 = single-process)")
     args = ap.parse_args()
 
     pairs = (
@@ -921,7 +966,8 @@ def main() -> None:
         logger.info("--download-only: done.")
         return
 
-    pf, equity_log = phase2_simulate(pairs, analysis_interval_h=args.interval)
+    pf, equity_log = phase2_simulate(pairs, analysis_interval_h=args.interval,
+                                     workers=args.workers)
     phase3_report(pf, equity_log)
 
 
