@@ -192,8 +192,10 @@ class TestMinConfluenceScoreFilter:
     def test_zero_threshold_allows_all_levels(self):
         orig_rsi   = an.REQUIRE_RSI_DIVERGENCE
         orig_score = an.MIN_CONFLUENCE_SCORE
+        orig_long  = an.LONG_MIN_CONFLUENCE
         an.REQUIRE_RSI_DIVERGENCE = False
         an.MIN_CONFLUENCE_SCORE   = 0
+        an.LONG_MIN_CONFLUENCE    = 0
         df      = self._bullish_df()
         current = float(df["close"].iloc[-1])
         levels  = [
@@ -208,6 +210,7 @@ class TestMinConfluenceScoreFilter:
         )
         an.REQUIRE_RSI_DIVERGENCE = orig_rsi
         an.MIN_CONFLUENCE_SCORE   = orig_score
+        an.LONG_MIN_CONFLUENCE    = orig_long
         assert len(sigs) >= 1
 
     def test_confluence_filter_bypassed_in_recovery(self):
@@ -247,7 +250,7 @@ class TestHtfRsiPassthrough:
         current = float(df["close"].iloc[-1])
         levels = [
             {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
-             "confluence_score": 1, "confluence_tags": ["EMA21"]},
+             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
             {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
              "confluence_score": 0, "confluence_tags": []},
         ]

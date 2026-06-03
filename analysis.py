@@ -21,6 +21,7 @@ from config import (
     CRASH_SL_BUFFER, PUMP_SL_BUFFER, HTF_SR_REQUIRE_CONFIRM,
     MIN_CONFLUENCE_SCORE, HTF_RSI_OVERBOUGHT, HTF_RSI_OVERSOLD,
     CHOPPY_ADX_CONFIRM, CHOPPY_ATR_MIN, RR_MAX,
+    MAX_SL_PERCENT, LONG_MIN_CONFLUENCE, LONG_HTF_RSI_MIN,
 )
 from indicators import _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series
 
@@ -505,10 +506,16 @@ def find_entry_signals(
 
         entry = lvl["price"]
 
+        if not special and direction == "LONG" and LONG_MIN_CONFLUENCE > 0:
+            if lvl.get("confluence_score", 0) < LONG_MIN_CONFLUENCE:
+                continue
+
         if not special and htf_rsi is not None:
             if direction == "LONG"  and htf_rsi > HTF_RSI_OVERBOUGHT:
                 continue
             if direction == "SHORT" and htf_rsi < HTF_RSI_OVERSOLD:
+                continue
+            if direction == "LONG" and LONG_HTF_RSI_MIN > 0 and htf_rsi < LONG_HTF_RSI_MIN:
                 continue
 
         divergence = (
@@ -587,6 +594,11 @@ def find_entry_signals(
                         continue  # S/R too close for minimum RR — skip
                 else:
                     tp = entry - tp_min
+
+        # Reject trades where ATR-based SL is too wide (volatile altcoins)
+        if not special and MAX_SL_PERCENT > 0 and sl_dist > 0:
+            if sl_dist / entry * 100 > MAX_SL_PERCENT:
+                continue
 
         # Cap TP at RR_MAX to avoid unreachable targets (e.g. RR=31, 74)
         if RR_MAX > 0 and sl_dist > 0:

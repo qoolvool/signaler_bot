@@ -83,7 +83,10 @@ COMMISSION_TAKER         = float(os.getenv("COMMISSION_TAKER", "0.0005"))
 CHOPPY_ADX_CONFIRM       = int(os.getenv("CHOPPY_ADX_CONFIRM", "4"))
 CHOPPY_ATR_MIN           = float(os.getenv("CHOPPY_ATR_MIN", "0.75"))
 RR_MAX                   = float(os.getenv("RR_MAX", "8.0"))
-BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.65"))
+MAX_SL_PERCENT           = float(os.getenv("MAX_SL_PERCENT", "3.5"))
+LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "2"))
+LONG_HTF_RSI_MIN         = float(os.getenv("LONG_HTF_RSI_MIN", "40.0"))
+BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
 
 TRAILING_STOP = os.getenv("TRAILING_STOP", "true").lower() == "true"
 TRAILING_MULT = float(os.getenv("TRAILING_MULT", "1.2"))
