@@ -53,23 +53,20 @@ def _count_touches(
 ) -> int:
     upper = level * (1 + tolerance)
     lower = level * (1 - tolerance)
-    avg_volume   = df["volume"].mean()
-    touch_indices = []
-    for i in range(len(df)):
-        high, low = df["high"].iat[i], df["low"].iat[i]
-        if not ((lower <= high <= upper) or (lower <= low <= upper)):
-            continue
-        if volume_multiplier > 0 and df["volume"].iat[i] < avg_volume * volume_multiplier:
-            continue
-        touch_indices.append(i)
-    if not touch_indices:
+    hit = df["high"].between(lower, upper) | df["low"].between(lower, upper)
+    if volume_multiplier > 0:
+        avg_vol = df["volume"].mean()
+        if avg_vol > 0:
+            hit = hit & (df["volume"] >= avg_vol * volume_multiplier)
+    positions = hit.values.nonzero()[0]
+    if len(positions) == 0:
         return 0
     if min_spacing <= 0:
-        return len(touch_indices)
-    filtered = [touch_indices[0]]
-    for idx in touch_indices[1:]:
-        if idx - filtered[-1] >= min_spacing:
-            filtered.append(idx)
+        return len(positions)
+    filtered = [positions[0]]
+    for pos in positions[1:]:
+        if pos - filtered[-1] >= min_spacing:
+            filtered.append(pos)
     return len(filtered)
 
 
@@ -469,7 +466,7 @@ def find_entry_signals(
             return []
         # ADX persistence filter: require ADX ≥ adx_min for last N consecutive bars
         if adx_min > 0 and CHOPPY_ADX_CONFIRM > 0:
-            adx_s = _calc_adx_series(df, atr_period)
+            adx_s, _, _ = _calc_adx_series(df, atr_period)
             if len(adx_s) >= CHOPPY_ADX_CONFIRM:
                 if float(adx_s.iloc[-CHOPPY_ADX_CONFIRM:].min()) < adx_min:
                     logger.info("ADX choppy — min %.1f < %.1f за последние %d баров",
@@ -508,6 +505,8 @@ def find_entry_signals(
 
         if not special and direction == "LONG" and LONG_MIN_CONFLUENCE > 0:
             if lvl.get("confluence_score", 0) < LONG_MIN_CONFLUENCE:
+                logger.debug("LONG пропущен: confluence=%d < LONG_MIN_CONFLUENCE=%d",
+                             lvl.get("confluence_score", 0), LONG_MIN_CONFLUENCE)
                 continue
 
         if not special and htf_rsi is not None:
@@ -570,11 +569,9 @@ def find_entry_signals(
                     nearest = above[0]["price"]
                     nearest_rr = (nearest - entry) / sl_dist
                     if nearest_rr >= min_rr:
-                        tp = nearest  # S/R meets RR — use it even if < ATR min
-                    elif nearest >= entry + tp_min:
-                        tp = nearest  # S/R beyond ATR min — use it
+                        tp = nearest
                     else:
-                        continue  # S/R too close for minimum RR — skip
+                        continue  # nearest S/R doesn't meet RR — skip
                 else:
                     tp = entry + tp_min
             else:
@@ -587,16 +584,14 @@ def find_entry_signals(
                     nearest = below[0]["price"]
                     nearest_rr = (entry - nearest) / sl_dist
                     if nearest_rr >= min_rr:
-                        tp = nearest  # S/R meets RR — use it even if < ATR min
-                    elif nearest <= entry - tp_min:
-                        tp = nearest  # S/R beyond ATR min — use it
+                        tp = nearest
                     else:
-                        continue  # S/R too close for minimum RR — skip
+                        continue  # nearest S/R doesn't meet RR — skip
                 else:
                     tp = entry - tp_min
 
-        # Reject trades where ATR-based SL is too wide (volatile altcoins)
-        if not special and MAX_SL_PERCENT > 0 and sl_dist > 0:
+        # Reject trades where SL is too wide regardless of regime
+        if MAX_SL_PERCENT > 0 and sl_dist > 0:
             if sl_dist / entry * 100 > MAX_SL_PERCENT:
                 continue
 

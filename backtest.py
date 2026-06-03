@@ -51,7 +51,7 @@ except ImportError:
 # ── Bot modules ──────────────────────────────────────────────────────────────
 from config import (
     TRADING_PAIRS, CANDLES_LIMIT, TOLERANCE_PERCENT,
-    EXTREMA_WINDOW, TOP_N_LEVELS, HTF_STRUCTURE_WINDOW,
+    EXTREMA_WINDOW, TOP_N_LEVELS, MIN_TOUCHES, HTF_STRUCTURE_WINDOW,
     ENTRY_PROXIMITY_PERCENT, EMA_PERIOD,
     ATR_PERIOD, SL_ATR_MULT, TP_ATR_MIN_MULT, MIN_RR,
     HTF_TIMEFRAME, HTF_EMA_PERIOD, ADX_PERIOD, ADX_MIN,
@@ -237,7 +237,7 @@ def _htf_from_df(df_4h: Optional[pd.DataFrame]) -> Tuple:
         htf_rsi   = rsi_raw if not np.isnan(rsi_raw) else None
         htf_sr: List[Dict] = []
         if HTF_SR_CANDLES > 0 and len(df_4h) >= EXTREMA_WINDOW * 2 + 1:
-            htf_sr = find_support_resistance(df_4h.tail(HTF_SR_CANDLES), min_touches=2, top_n=10)
+            htf_sr = find_support_resistance(df_4h.tail(HTF_SR_CANDLES), min_touches=MIN_TOUCHES, top_n=TOP_N_LEVELS)
         return trend, round(ema_val, 8), htf_sr, structure, htf_rsi
     except Exception as exc:
         logger.debug("HTF error: %s", exc)
@@ -268,6 +268,7 @@ def _position_checks(
     if triggered:
         pf.check_breakeven(pair, high, low)
         pf.check_trailing_stop(pair, high, low)
+        closed.extend(pf.check_sl_tp(pair, high, low))
 
     return closed
 

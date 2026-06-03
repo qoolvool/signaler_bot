@@ -26,10 +26,11 @@ def _calc_atr(df: pd.DataFrame, period: int = 14) -> float:
     return float(tr.rolling(period).mean().iloc[-1])
 
 
-def _calc_adx_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Wilder's ADX as a full Series (without +DI/-DI). Used for persistence checks."""
+def _calc_adx_series(df: pd.DataFrame, period: int = 14):
+    """Wilder's ADX as full Series. Returns (adx_series, pdi_series, ndi_series)."""
+    _empty = pd.Series(dtype=float)
     if len(df) < period * 2:
-        return pd.Series(dtype=float)
+        return _empty, _empty, _empty
     high  = df["high"].astype(float)
     low   = df["low"].astype(float)
     close = df["close"].astype(float)
@@ -46,31 +47,16 @@ def _calc_adx_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
     ndi   = 100.0 * ndm_s / atr_s.replace(0, float("nan"))
     denom = (pdi + ndi).replace(0, float("nan"))
     dx    = 100.0 * (pdi - ndi).abs() / denom
-    return dx.ewm(alpha=alpha, adjust=False).mean()
+    adx = dx.ewm(alpha=alpha, adjust=False).mean()
+    return adx, pdi, ndi
 
 
 def _calc_adx(df: pd.DataFrame, period: int = 14):
     """Wilder's ADX. Возвращает (adx, +DI, -DI). При нехватке данных — (None, None, None)."""
-    if len(df) < period * 2:
+    adx_s, pdi, ndi = _calc_adx_series(df, period)
+    if adx_s.empty:
         return None, None, None
-    high  = df["high"].astype(float)
-    low   = df["low"].astype(float)
-    close = df["close"].astype(float)
-    ph, pl, pc = high.shift(1), low.shift(1), close.shift(1)
-    tr  = pd.concat([high - low, (high - pc).abs(), (low - pc).abs()], axis=1).max(axis=1)
-    up, dn = high - ph, pl - low
-    pdm = ((up > dn) & (up > 0)).astype(float) * up
-    ndm = ((dn > up) & (dn > 0)).astype(float) * dn
-    alpha = 1.0 / period
-    atr_s = tr.ewm(alpha=alpha, adjust=False).mean()
-    pdm_s = pdm.ewm(alpha=alpha, adjust=False).mean()
-    ndm_s = ndm.ewm(alpha=alpha, adjust=False).mean()
-    pdi   = 100.0 * pdm_s / atr_s.replace(0, float("nan"))
-    ndi   = 100.0 * ndm_s / atr_s.replace(0, float("nan"))
-    denom = (pdi + ndi).replace(0, float("nan"))
-    dx    = 100.0 * (pdi - ndi).abs() / denom
-    adx   = dx.ewm(alpha=alpha, adjust=False).mean()
-    return float(adx.iloc[-1]), float(pdi.iloc[-1]), float(ndi.iloc[-1])
+    return float(adx_s.iloc[-1]), float(pdi.iloc[-1]), float(ndi.iloc[-1])
 
 
 def _calc_rsi_series(df: pd.DataFrame, period: int = 14) -> pd.Series:

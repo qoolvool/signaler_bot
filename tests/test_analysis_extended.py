@@ -263,6 +263,60 @@ class TestHtfRsiPassthrough:
         assert len(sigs) >= 1
 
 
+# ── atr_ratio choppy filter ───────────────────────────────────────────────────
+
+class TestChoppyAtrRatioFilter:
+    def _bullish_df(self, n: int = 300):
+        closes = [100.0 + i * 0.1 for i in range(n)]
+        return make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+
+    def test_low_atr_ratio_blocks_signals(self):
+        """atr_ratio below CHOPPY_ATR_MIN should suppress all signals."""
+        orig_rsi = an.REQUIRE_RSI_DIVERGENCE
+        orig_min = an.CHOPPY_ATR_MIN
+        an.REQUIRE_RSI_DIVERGENCE = False
+        an.CHOPPY_ATR_MIN = 0.75
+        df = self._bullish_df()
+        current = float(df["close"].iloc[-1])
+        levels = [
+            {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
+             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
+            {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
+             "confluence_score": 0, "confluence_tags": []},
+        ]
+        sigs = an.find_entry_signals(
+            df, levels, current_price=current,
+            htf_structure="BULLISH", adx_val=30.0, ema_period=50,
+            atr_ratio=0.5,  # below threshold → choppy filter fires
+        )
+        an.REQUIRE_RSI_DIVERGENCE = orig_rsi
+        an.CHOPPY_ATR_MIN = orig_min
+        assert sigs == []
+
+    def test_high_atr_ratio_allows_signals(self):
+        """atr_ratio above CHOPPY_ATR_MIN should not suppress signals."""
+        orig_rsi = an.REQUIRE_RSI_DIVERGENCE
+        orig_min = an.CHOPPY_ATR_MIN
+        an.REQUIRE_RSI_DIVERGENCE = False
+        an.CHOPPY_ATR_MIN = 0.75
+        df = self._bullish_df()
+        current = float(df["close"].iloc[-1])
+        levels = [
+            {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
+             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
+            {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
+             "confluence_score": 0, "confluence_tags": []},
+        ]
+        sigs = an.find_entry_signals(
+            df, levels, current_price=current,
+            htf_structure="BULLISH", adx_val=30.0, ema_period=50,
+            atr_ratio=1.5,  # above threshold → passes
+        )
+        an.REQUIRE_RSI_DIVERGENCE = orig_rsi
+        an.CHOPPY_ATR_MIN = orig_min
+        assert len(sigs) >= 1
+
+
 # ── is_round_number edge cases ─────────────────────────────────────────────────
 
 class TestIsRoundNumberEdge:
