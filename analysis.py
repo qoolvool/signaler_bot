@@ -363,7 +363,7 @@ def _check_correlation(pair: str, open_pairs: List[str]) -> bool:
         r2 = _returns_cache.get(op)
         if r2 is None:
             continue
-        combined = pd.concat([r1, r2], axis=1).dropna()
+        combined = pd.concat([r1, r2], axis=1, sort=False).dropna()
         if len(combined) < 10:
             continue
         if abs(combined.iloc[:, 0].corr(combined.iloc[:, 1])) > CORR_MAX:

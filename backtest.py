@@ -344,7 +344,7 @@ def _apply_orders(pf: BacktestPortfolio, pair: str, signals: List[Dict]) -> None
                 r2 = _returns_cache.get(op)
                 if r2 is None:
                     continue
-                combined = pd.concat([r1, r2], axis=1).dropna()
+                combined = pd.concat([r1, r2], axis=1, sort=False).dropna()
                 if len(combined) >= 10 and abs(combined.iloc[:, 0].corr(combined.iloc[:, 1])) > CORR_MAX:
                     best = {"LONG": None, "SHORT": None}
                     break
