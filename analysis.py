@@ -22,6 +22,8 @@ from config import (
     MIN_CONFLUENCE_SCORE, HTF_RSI_OVERBOUGHT, HTF_RSI_OVERSOLD,
     CHOPPY_ADX_CONFIRM, CHOPPY_ATR_MIN, RR_MAX,
     MAX_SL_PERCENT, LONG_MIN_CONFLUENCE, LONG_HTF_RSI_MIN, HTF_BELOW_EMA_MAX,
+    STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
+    QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
 )
 from indicators import _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series
 
@@ -347,6 +349,54 @@ def _detect_rsi_divergence(
 
 
 # ============================================================
+# СТРУКТУРНЫЙ SL + КАЧЕСТВО СИГНАЛА
+# ============================================================
+
+def _find_structural_sl(
+    df: pd.DataFrame,
+    entry: float,
+    direction: str,
+) -> Optional[float]:
+    """SL за ближайшим swing low/high вместо ATR. Возвращает цену SL или None."""
+    window = max(3, EXTREMA_WINDOW // 2)
+    needed = STRUCTURAL_SL_LOOKBACK + window * 2
+    if len(df) < needed:
+        return None
+    recent = df.iloc[-needed:]
+    if direction == "LONG":
+        candidates = [p for p, _ in _find_local_extrema(recent["low"], window, "min") if p < entry]
+        if not candidates:
+            return None
+        return max(candidates) * (1.0 - STRUCTURAL_SL_BUFFER / 100.0)
+    else:
+        candidates = [p for p, _ in _find_local_extrema(recent["high"], window, "max") if p > entry]
+        if not candidates:
+            return None
+        return min(candidates) * (1.0 + STRUCTURAL_SL_BUFFER / 100.0)
+
+
+def _calc_quality_mult(lvl: Dict, rr: float, htf_confirmed: bool) -> float:
+    """Множитель размера позиции по качеству сигнала [QUALITY_MULT_MIN, QUALITY_MULT_MAX]."""
+    score = lvl.get("confluence_score", 0)
+    if score == 0:
+        mult = 0.7
+    elif score == 1:
+        mult = 0.85
+    elif score == 2:
+        mult = 1.0
+    else:
+        mult = 1.2
+    if rr is not None:
+        if rr >= 3.5:
+            mult *= 1.2
+        elif rr >= 2.5:
+            mult *= 1.1
+    if htf_confirmed:
+        mult *= 1.1
+    return round(min(max(mult, QUALITY_MULT_MIN), QUALITY_MULT_MAX), 2)
+
+
+# ============================================================
 # ФИЛЬТР КОРРЕЛЯЦИИ
 # ============================================================
 
@@ -568,16 +618,23 @@ def find_entry_signals(
             sl = entry - sl_dist if recovery else entry + sl_dist
             tp = entry + tp_min  if recovery else entry - tp_min
         else:
-            sl_dist = atr * sl_atr_mult
-            tp_min  = atr * tp_atr_min_mult
+            # Structural SL (swing low/high) with ATR fallback
+            struct_sl = _find_structural_sl(df, entry, direction) if STRUCTURAL_SL else None
+            if struct_sl is not None:
+                sl      = struct_sl
+                sl_dist = abs(entry - sl)
+            else:
+                sl_dist = atr * sl_atr_mult
+                sl      = entry - sl_dist if direction == "LONG" else entry + sl_dist
+            tp_min = sl_dist * min_rr
+
             if direction == "LONG":
-                sl    = entry - sl_dist
                 above = sorted(
                     [l for l in levels if l["type"] == "RESISTANCE" and l["price"] > entry],
                     key=lambda x: x["price"],
                 )
                 if above:
-                    nearest = above[0]["price"]
+                    nearest    = above[0]["price"]
                     nearest_rr = (nearest - entry) / sl_dist
                     if nearest_rr >= min_rr:
                         tp = nearest
@@ -586,13 +643,12 @@ def find_entry_signals(
                 else:
                     tp = entry + tp_min
             else:
-                sl    = entry + sl_dist
                 below = sorted(
                     [l for l in levels if l["type"] == "SUPPORT" and l["price"] < entry],
                     key=lambda x: x["price"], reverse=True,
                 )
                 if below:
-                    nearest = below[0]["price"]
+                    nearest    = below[0]["price"]
                     nearest_rr = (entry - nearest) / sl_dist
                     if nearest_rr >= min_rr:
                         tp = nearest
@@ -618,8 +674,12 @@ def find_entry_signals(
         if rr is None or rr < min_rr:
             continue
 
-        risk_pct   = round(sl_dist / entry * 100, 2)
-        reward_pct = round(tp_dist / entry * 100, 2)
+        risk_pct    = round(sl_dist / entry * 100, 2)
+        reward_pct  = round(tp_dist / entry * 100, 2)
+        quality_mult = (
+            _calc_quality_mult(lvl, rr, lvl.get("htf_confirmed", False))
+            if QUALITY_SIZING else 1.0
+        )
 
         signals.append({
             "direction":         direction,
@@ -642,5 +702,6 @@ def find_entry_signals(
             "pattern_confirmed": pattern_confirmed,
             "vol_ratio":         vol_ratio,
             "volume_spike":      vol_spike,
+            "quality_mult":      quality_mult,
         })
     return signals

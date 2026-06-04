@@ -362,6 +362,7 @@ class PaperPortfolio:
         entry_price: float,
         sl: float,
         tp: float,
+        risk_mult: float = 1.0,
     ) -> Optional[Dict]:
         if self.balance <= 0:
             logger.warning("Баланс <= 0 ($%.2f) — создание ордеров остановлено.", self.balance)
@@ -378,7 +379,7 @@ class PaperPortfolio:
 
         sl_pct = abs(entry_price - sl) / entry_price
         if self.fixed_risk_mode and sl_pct > 0 and self.leverage > 0:
-            risk_amount = self.balance * self.risk_per_trade_percent / 100.0
+            risk_amount = self.balance * self.risk_per_trade_percent / 100.0 * risk_mult
             size_usd = risk_amount / (sl_pct * self.leverage)
             size_usd = min(size_usd, self.balance * self.max_trade_size_percent / 100.0)
         else:
