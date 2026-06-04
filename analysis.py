@@ -429,6 +429,7 @@ def find_entry_signals(
     rsi_series: Optional[pd.Series] = None,
     htf_rsi: Optional[float] = None,
     atr_ratio: float = 1.0,
+    adx_series: Optional[pd.Series] = None,
 ) -> List[Dict]:
     if regime in ("CRASH", "PUMP"):
         return []
@@ -466,7 +467,7 @@ def find_entry_signals(
             return []
         # ADX persistence filter: require ADX ≥ adx_min for last N consecutive bars
         if adx_min > 0 and CHOPPY_ADX_CONFIRM > 0:
-            adx_s, _, _ = _calc_adx_series(df, atr_period)
+            adx_s = adx_series if adx_series is not None else _calc_adx_series(df, atr_period)[0]
             if len(adx_s) >= CHOPPY_ADX_CONFIRM:
                 if float(adx_s.iloc[-CHOPPY_ADX_CONFIRM:].min()) < adx_min:
                     logger.info("ADX choppy — min %.1f < %.1f за последние %d баров",

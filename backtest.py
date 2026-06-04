@@ -29,7 +29,7 @@ import multiprocessing
 import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -70,7 +70,7 @@ from analysis import (
     _mark_htf_confirmed, _detect_htf_structure, _returns_cache,
 )
 from indicators import (
-    _calc_adx, _calc_rsi_series, _calc_atr_ratio,
+    _calc_adx_series, _calc_rsi_series, _calc_atr_ratio,
     _detect_regime, _find_crash_low, _find_pump_high,
 )
 from paper_trader import PaperPortfolio
@@ -83,6 +83,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("backtest")
+# Bot loggers are silenced during simulation — only progress bar is shown
+logging.getLogger("signaler").setLevel(logging.WARNING)
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 BASE_DIR    = Path(__file__).parent
@@ -291,13 +293,16 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
     _add_confluence_scores(levels, ema_lvls, fvg_zones, TOLERANCE_PERCENT)
     if htf_sr:
         _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
-    adx_val, _, _ = _calc_adx(df_1h, ADX_PERIOD)
-    rsi_series    = _calc_rsi_series(df_1h, RSI_PERIOD)
-    atr_ratio     = _calc_atr_ratio(df_1h, ATR_PERIOD)
-    regime        = _detect_regime(rsi_series, atr_ratio)
-    crash_low     = _find_crash_low(df_1h, CRASH_LOW_LOOKBACK) if regime == "RECOVERY"   else None
-    pump_high     = _find_pump_high(df_1h, PUMP_HIGH_LOOKBACK) if regime == "CORRECTION" else None
-    c             = float(df_1h.iloc[-1]["close"])
+    # Compute ADX series once — reused by find_entry_signals choppy filter
+    adx_s, pdi_s, ndi_s = _calc_adx_series(df_1h, ADX_PERIOD)
+    adx_val   = (float(adx_s.iloc[-1]), float(pdi_s.iloc[-1]), float(ndi_s.iloc[-1])) if not adx_s.empty else (None, None, None)
+    adx_val   = adx_val[0]
+    rsi_series = _calc_rsi_series(df_1h, RSI_PERIOD)
+    atr_ratio  = _calc_atr_ratio(df_1h, ATR_PERIOD)
+    regime     = _detect_regime(rsi_series, atr_ratio)
+    crash_low  = _find_crash_low(df_1h, CRASH_LOW_LOOKBACK) if regime == "RECOVERY"   else None
+    pump_high  = _find_pump_high(df_1h, PUMP_HIGH_LOOKBACK) if regime == "CORRECTION" else None
+    c          = float(df_1h.iloc[-1]["close"])
     signal_levels = (
         [lv for lv in levels if lv.get("htf_confirmed")]
         if HTF_SR_REQUIRE_CONFIRM and htf_sr
@@ -308,7 +313,7 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
         htf_trend=htf_trend, adx_val=adx_val, regime=regime,
         crash_low=crash_low, pump_high=pump_high,
         htf_structure=htf_structure, rsi_series=rsi_series, htf_rsi=htf_rsi,
-        atr_ratio=atr_ratio,
+        atr_ratio=atr_ratio, adx_series=adx_s,
     )
     returns = df_1h["close"].pct_change().dropna().tail(CORR_LOOKBACK)
     return pair, signals, returns
@@ -441,14 +446,26 @@ def phase2_simulate(
 
     n_workers = workers or min(len(active), os.cpu_count() or 4)
     use_pool  = n_workers > 1
-    logger.info("Workers: %d  (use_pool=%s)", n_workers, use_pool)
+    logger.info("Workers: %d  (threads)", n_workers)
 
-    # ── Progress bar (optional) ────────────────────────────────
-    try:
-        from tqdm import tqdm
-        ts_iter = tqdm(all_ts, desc="Simulating", unit="h", ncols=90)
-    except ImportError:
-        ts_iter = all_ts
+    total_steps = len(all_ts)
+    _t_start    = time.perf_counter()
+    _last_print = [-1]  # mutable for closure
+
+    def _progress(step: int, n_closed: int) -> None:
+        pct = step / total_steps * 100
+        if int(pct * 10) == _last_print[0]:
+            return
+        _last_print[0] = int(pct * 10)
+        elapsed = time.perf_counter() - _t_start
+        eta     = (elapsed / step * (total_steps - step)) if step > 0 else 0
+        bar_w   = 30
+        filled  = int(bar_w * step / total_steps)
+        bar     = "█" * filled + "░" * (bar_w - filled)
+        e_str   = f"{int(elapsed//60):02d}:{int(elapsed%60):02d}"
+        eta_str = f"{int(eta//60):02d}:{int(eta%60):02d}"
+        print(f"\r  [{bar}] {pct:5.1f}%  {e_str} elapsed  ETA {eta_str}  trades {n_closed}",
+              end="", flush=True)
 
     def _slice_1h(pair: str, ts: pd.Timestamp) -> Optional[pd.DataFrame]:
         pos = ts_pos_1h[pair].get(ts)
@@ -469,8 +486,10 @@ def phase2_simulate(
         return sliced if len(sliced) >= HTF_EMA_PERIOD else None
 
     # ── Main loop ──────────────────────────────────────────────
-    with (ProcessPoolExecutor(max_workers=n_workers) if use_pool else _null_ctx()) as pool:
-        for ts in ts_iter:
+    print(f"\n  Backtesting {len(active)} pairs over {len(all_ts):,} hourly steps "
+          f"({all_ts[0].date()} → {all_ts[-1].date()})  workers={n_workers}\n")
+    with (ThreadPoolExecutor(max_workers=n_workers) if use_pool else _null_ctx()) as pool:
+        for step, ts in enumerate(all_ts, 1):
             pf._sim_time = ts.strftime("%Y-%m-%d %H:%M:%S UTC")
             prices: Dict[str, float] = {}
             analysis_tasks: List[Tuple] = []
@@ -512,7 +531,12 @@ def phase2_simulate(
                 "balance":   pf.balance,
             })
 
-    logger.info("\n=== PHASE 2 complete: %d closed / %d open trades ===\n",
+            _progress(step, len(pf.closed_trades))
+
+    elapsed_total = time.perf_counter() - _t_start
+    print(f"\r  [{'█'*30}] 100.0%  done in "
+          f"{int(elapsed_total//60):02d}:{int(elapsed_total%60):02d}           \n")
+    logger.info("=== PHASE 2 complete: %d closed / %d open trades ===\n",
                 len(pf.closed_trades), len(pf.open_trades))
     return pf, equity_log
 
