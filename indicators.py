@@ -22,7 +22,7 @@ def _calc_atr(df: pd.DataFrame, period: int = 14) -> float:
         df["high"] - df["low"],
         (df["high"] - prev_close).abs(),
         (df["low"]  - prev_close).abs(),
-    ], axis=1).max(axis=1)
+    ], axis=1, sort=False).max(axis=1)
     return float(tr.rolling(period).mean().iloc[-1])
 
 
@@ -35,7 +35,7 @@ def _calc_adx_series(df: pd.DataFrame, period: int = 14):
     low   = df["low"].astype(float)
     close = df["close"].astype(float)
     ph, pl, pc = high.shift(1), low.shift(1), close.shift(1)
-    tr  = pd.concat([high - low, (high - pc).abs(), (low - pc).abs()], axis=1).max(axis=1)
+    tr  = pd.concat([high - low, (high - pc).abs(), (low - pc).abs()], axis=1, sort=False).max(axis=1)
     up, dn = high - ph, pl - low
     pdm = ((up > dn) & (up > 0)).astype(float) * up
     ndm = ((dn > up) & (dn > 0)).astype(float) * dn
@@ -77,7 +77,7 @@ def _calc_atr_ratio(df: pd.DataFrame, atr_period: int = 14, avg_period: int = 20
         df["high"] - df["low"],
         (df["high"] - prev_close).abs(),
         (df["low"]  - prev_close).abs(),
-    ], axis=1).max(axis=1)
+    ], axis=1, sort=False).max(axis=1)
     atr_series = tr.rolling(atr_period).mean().dropna()
     if len(atr_series) < avg_period + 1:
         return 1.0
