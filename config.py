@@ -89,7 +89,7 @@ LONG_HTF_RSI_MIN         = float(os.getenv("LONG_HTF_RSI_MIN", "50.0"))
 HTF_BELOW_EMA_MAX        = int(os.getenv("HTF_BELOW_EMA_MAX", "2"))
 BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
 STRUCTURAL_SL            = os.getenv("STRUCTURAL_SL", "true").lower() == "true"
-STRUCTURAL_SL_BUFFER     = float(os.getenv("STRUCTURAL_SL_BUFFER", "0.1"))
+STRUCTURAL_SL_BUFFER     = float(os.getenv("STRUCTURAL_SL_BUFFER", "0.3"))
 STRUCTURAL_SL_LOOKBACK   = int(os.getenv("STRUCTURAL_SL_LOOKBACK", "20"))
 QUALITY_SIZING           = os.getenv("QUALITY_SIZING", "true").lower() == "true"
 QUALITY_MULT_MIN         = float(os.getenv("QUALITY_MULT_MIN", "0.7"))
