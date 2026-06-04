@@ -438,7 +438,7 @@ def find_entry_signals(
         return []
 
     if ema_period >= len(df):
-        logger.warning("Недостаточно свечей для EMA%d (%d)", ema_period, len(df))
+        logger.debug("Недостаточно свечей для EMA%d (%d)", ema_period, len(df))
         return []
 
     proximity = proximity_percent / 100.0
