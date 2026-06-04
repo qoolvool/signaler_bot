@@ -354,6 +354,7 @@ def _apply_orders(pair: str, signals: List[Dict]) -> None:
             entry_price=sig["level"]["price"],
             sl=sig["sl"],
             tp=sig["tp"],
+            risk_mult=sig.get("quality_mult", 1.0),
         )
 
 
