@@ -21,7 +21,7 @@ from config import (
     CRASH_SL_BUFFER, PUMP_SL_BUFFER, HTF_SR_REQUIRE_CONFIRM,
     MIN_CONFLUENCE_SCORE, HTF_RSI_OVERBOUGHT, HTF_RSI_OVERSOLD,
     CHOPPY_ADX_CONFIRM, CHOPPY_ATR_MIN, RR_MAX,
-    MAX_SL_PERCENT, LONG_MIN_CONFLUENCE, LONG_HTF_RSI_MIN,
+    MAX_SL_PERCENT, LONG_MIN_CONFLUENCE, LONG_HTF_RSI_MIN, HTF_BELOW_EMA_MAX,
 )
 from indicators import _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series
 
@@ -249,27 +249,29 @@ def _detect_htf_structure(df: pd.DataFrame, window: int = HTF_STRUCTURE_WINDOW) 
 
 
 def _fetch_htf_confluence(client, pair: str):
-    """Один запрос HTF_TIMEFRAME → (trend, ema, sr_levels, structure, htf_rsi)."""
+    """Один запрос HTF_TIMEFRAME → (trend, ema, sr_levels, structure, htf_rsi, htf_below_ema)."""
     try:
         needed = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
         raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=needed)
         if not raw or len(raw) < HTF_EMA_PERIOD:
-            return None, None, [], "RANGE", None
+            return None, None, [], "RANGE", None, None
         df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
         closes    = df_htf["close"].astype(float)
-        ema       = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
+        ema_s     = closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean()
+        ema       = float(ema_s.iloc[-1])
         trend     = "UP" if float(closes.iloc[-1]) > ema else "DOWN"
         structure = _detect_htf_structure(df_htf)
         rsi_raw   = float(_calc_rsi_series(df_htf).iloc[-1])
         htf_rsi   = rsi_raw if not pd.isna(rsi_raw) else None
+        htf_below_ema = int((closes.iloc[-5:].values < ema_s.iloc[-5:].values).sum())
         htf_sr: List[Dict] = []
         if HTF_SR_CANDLES > 0 and len(df_htf) >= EXTREMA_WINDOW * 2 + 1:
             htf_sr = find_support_resistance(df_htf)
-        return trend, round(ema, 8), htf_sr, structure, htf_rsi
+        return trend, round(ema, 8), htf_sr, structure, htf_rsi, htf_below_ema
     except Exception as exc:
         logger.warning("Ошибка HTF анализа %s: %s", pair, exc)
-        return None, None, [], "RANGE", None
+        return None, None, [], "RANGE", None, None
 
 
 def _mark_htf_confirmed(
@@ -430,6 +432,7 @@ def find_entry_signals(
     htf_rsi: Optional[float] = None,
     atr_ratio: float = 1.0,
     adx_series: Optional[pd.Series] = None,
+    htf_below_ema: Optional[int] = None,
 ) -> List[Dict]:
     if regime in ("CRASH", "PUMP"):
         return []
@@ -517,6 +520,13 @@ def find_entry_signals(
                 continue
             if direction == "LONG" and LONG_HTF_RSI_MIN > 0 and htf_rsi < LONG_HTF_RSI_MIN:
                 continue
+
+        if (not special and direction == "LONG"
+                and htf_below_ema is not None and HTF_BELOW_EMA_MAX >= 0
+                and htf_below_ema > HTF_BELOW_EMA_MAX):
+            logger.debug("LONG пропущен: %d из 5 HTF свечей ниже EMA > HTF_BELOW_EMA_MAX=%d",
+                         htf_below_ema, HTF_BELOW_EMA_MAX)
+            continue
 
         divergence = (
             _detect_rsi_divergence(df, rsi_series, direction, entry)

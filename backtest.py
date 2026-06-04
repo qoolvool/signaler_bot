@@ -227,23 +227,25 @@ class BacktestPortfolio(PaperPortfolio):
 # ============================================================
 
 def _htf_from_df(df_4h: Optional[pd.DataFrame]) -> Tuple:
-    """Return (trend, ema, htf_sr, structure, htf_rsi) from pre-loaded 4h data."""
+    """Return (trend, ema, htf_sr, structure, htf_rsi, htf_below_ema) from pre-loaded 4h data."""
     try:
         if df_4h is None or len(df_4h) < HTF_EMA_PERIOD:
-            return None, None, [], "RANGE", None
+            return None, None, [], "RANGE", None, None
         closes    = df_4h["close"].astype(float)
-        ema_val   = float(closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean().iloc[-1])
+        ema_s     = closes.ewm(span=HTF_EMA_PERIOD, adjust=False).mean()
+        ema_val   = float(ema_s.iloc[-1])
         trend     = "UP" if float(closes.iloc[-1]) > ema_val else "DOWN"
         structure = _detect_htf_structure(df_4h)
         rsi_raw   = float(_calc_rsi_series(df_4h).iloc[-1])
         htf_rsi   = rsi_raw if not np.isnan(rsi_raw) else None
+        htf_below_ema = int((closes.iloc[-5:].values < ema_s.iloc[-5:].values).sum())
         htf_sr: List[Dict] = []
         if HTF_SR_CANDLES > 0 and len(df_4h) >= EXTREMA_WINDOW * 2 + 1:
             htf_sr = find_support_resistance(df_4h.tail(HTF_SR_CANDLES), min_touches=MIN_TOUCHES, top_n=TOP_N_LEVELS)
-        return trend, round(ema_val, 8), htf_sr, structure, htf_rsi
+        return trend, round(ema_val, 8), htf_sr, structure, htf_rsi, htf_below_ema
     except Exception as exc:
         logger.debug("HTF error: %s", exc)
-        return None, None, [], "RANGE", None
+        return None, None, [], "RANGE", None, None
 
 
 # ============================================================
@@ -286,7 +288,7 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
     Returns (pair, signals, returns_series).
     """
     pair, df_1h, df_4h = args
-    htf_trend, htf_ema, htf_sr, htf_structure, htf_rsi = _htf_from_df(df_4h)
+    htf_trend, htf_ema, htf_sr, htf_structure, htf_rsi, htf_below_ema = _htf_from_df(df_4h)
     levels    = find_support_resistance(df_1h)
     ema_lvls  = _calc_ema_levels(df_1h, EMA_CONFLUENCE_PERIODS)
     fvg_zones = _find_fvg_zones(df_1h, FVG_LOOKBACK, FVG_MIN_GAP_PCT)
@@ -313,7 +315,7 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
         htf_trend=htf_trend, adx_val=adx_val, regime=regime,
         crash_low=crash_low, pump_high=pump_high,
         htf_structure=htf_structure, rsi_series=rsi_series, htf_rsi=htf_rsi,
-        atr_ratio=atr_ratio, adx_series=adx_s,
+        atr_ratio=atr_ratio, adx_series=adx_s, htf_below_ema=htf_below_ema,
     )
     returns = df_1h["close"].pct_change().dropna().tail(CORR_LOOKBACK)
     return pair, signals, returns

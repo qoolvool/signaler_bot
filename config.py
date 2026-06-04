@@ -85,7 +85,8 @@ CHOPPY_ATR_MIN           = float(os.getenv("CHOPPY_ATR_MIN", "0.75"))
 RR_MAX                   = float(os.getenv("RR_MAX", "8.0"))
 MAX_SL_PERCENT           = float(os.getenv("MAX_SL_PERCENT", "3.5"))
 LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "2"))
-LONG_HTF_RSI_MIN         = float(os.getenv("LONG_HTF_RSI_MIN", "40.0"))
+LONG_HTF_RSI_MIN         = float(os.getenv("LONG_HTF_RSI_MIN", "50.0"))
+HTF_BELOW_EMA_MAX        = int(os.getenv("HTF_BELOW_EMA_MAX", "2"))
 BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
 
 TRAILING_STOP = os.getenv("TRAILING_STOP", "true").lower() == "true"
@@ -117,7 +118,7 @@ CORR_MAX      = float(os.getenv("CORR_MAX", "0.75"))
 
 INITIAL_BALANCE       = float(os.getenv("INITIAL_BALANCE", "1000"))
 TRADE_SIZE_PERCENT    = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
-MAX_OPEN_TRADES       = int(os.getenv("MAX_OPEN_TRADES", "0"))
+MAX_OPEN_TRADES       = int(os.getenv("MAX_OPEN_TRADES", "5"))
 PENDING_EXPIRY_CHECKS = int(os.getenv("PENDING_EXPIRY_CHECKS", "96"))
 LEVERAGE              = int(os.getenv("LEVERAGE", "10"))
 
