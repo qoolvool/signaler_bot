@@ -26,10 +26,11 @@ def _calc_atr(df: pd.DataFrame, period: int = 14) -> float:
     return float(tr.rolling(period).mean().iloc[-1])
 
 
-def _calc_adx(df: pd.DataFrame, period: int = 14):
-    """Wilder's ADX. Возвращает (adx, +DI, -DI). При нехватке данных — (None, None, None)."""
+def _calc_adx_series(df: pd.DataFrame, period: int = 14):
+    """Wilder's ADX as full Series. Returns (adx_series, pdi_series, ndi_series)."""
+    _empty = pd.Series(dtype=float)
     if len(df) < period * 2:
-        return None, None, None
+        return _empty, _empty, _empty
     high  = df["high"].astype(float)
     low   = df["low"].astype(float)
     close = df["close"].astype(float)
@@ -46,8 +47,16 @@ def _calc_adx(df: pd.DataFrame, period: int = 14):
     ndi   = 100.0 * ndm_s / atr_s.replace(0, float("nan"))
     denom = (pdi + ndi).replace(0, float("nan"))
     dx    = 100.0 * (pdi - ndi).abs() / denom
-    adx   = dx.ewm(alpha=alpha, adjust=False).mean()
-    return float(adx.iloc[-1]), float(pdi.iloc[-1]), float(ndi.iloc[-1])
+    adx = dx.ewm(alpha=alpha, adjust=False).mean()
+    return adx, pdi, ndi
+
+
+def _calc_adx(df: pd.DataFrame, period: int = 14):
+    """Wilder's ADX. Возвращает (adx, +DI, -DI). При нехватке данных — (None, None, None)."""
+    adx_s, pdi, ndi = _calc_adx_series(df, period)
+    if adx_s.empty:
+        return None, None, None
+    return float(adx_s.iloc[-1]), float(pdi.iloc[-1]), float(ndi.iloc[-1])
 
 
 def _calc_rsi_series(df: pd.DataFrame, period: int = 14) -> pd.Series:

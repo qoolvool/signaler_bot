@@ -420,7 +420,7 @@ class TestFindEntrySignals:
         current = float(df["close"].iloc[-1])
         levels = [
             {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
-             "confluence_score": 1, "confluence_tags": ["EMA21"]},
+             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
             {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
              "confluence_score": 0, "confluence_tags": []},
         ]
@@ -462,7 +462,7 @@ class TestFindEntrySignals:
         current = float(df["close"].iloc[-1])
         levels = [
             {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
-             "confluence_score": 1, "confluence_tags": ["EMA21"]},
+             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
             {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
              "confluence_score": 0, "confluence_tags": []},
         ]
@@ -494,7 +494,7 @@ class TestFindEntrySignals:
         lvl_price = round(current * 0.998, 2)
         levels = [{
             "price": lvl_price, "type": "SUPPORT", "touches": 5,
-            "confluence_score": 1, "confluence_tags": ["EMA21"],
+            "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"],
             "has_retest": False, "htf_confirmed": False,
         }]
         orig_rsi  = an.REQUIRE_RSI_DIVERGENCE
@@ -527,7 +527,7 @@ class TestFindEntrySignals:
         tp_price      = round(current * 1.15, 2)
         levels = [
             {"price": support_price, "type": "SUPPORT",    "touches": 5,
-             "confluence_score": 1, "confluence_tags": ["EMA21"]},
+             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
             {"price": tp_price,      "type": "RESISTANCE", "touches": 3,
              "confluence_score": 0, "confluence_tags": []},
         ]
