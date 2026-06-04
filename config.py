@@ -92,8 +92,8 @@ STRUCTURAL_SL            = os.getenv("STRUCTURAL_SL", "true").lower() == "true"
 STRUCTURAL_SL_BUFFER     = float(os.getenv("STRUCTURAL_SL_BUFFER", "0.3"))
 STRUCTURAL_SL_LOOKBACK   = int(os.getenv("STRUCTURAL_SL_LOOKBACK", "20"))
 QUALITY_SIZING           = os.getenv("QUALITY_SIZING", "true").lower() == "true"
-QUALITY_MULT_MIN         = float(os.getenv("QUALITY_MULT_MIN", "0.7"))
-QUALITY_MULT_MAX         = float(os.getenv("QUALITY_MULT_MAX", "1.5"))
+QUALITY_MULT_MIN         = float(os.getenv("QUALITY_MULT_MIN", "0.8"))
+QUALITY_MULT_MAX         = float(os.getenv("QUALITY_MULT_MAX", "2.0"))
 
 TRAILING_STOP = os.getenv("TRAILING_STOP", "true").lower() == "true"
 TRAILING_MULT = float(os.getenv("TRAILING_MULT", "1.2"))
@@ -124,7 +124,7 @@ CORR_MAX      = float(os.getenv("CORR_MAX", "0.75"))
 
 INITIAL_BALANCE       = float(os.getenv("INITIAL_BALANCE", "1000"))
 TRADE_SIZE_PERCENT    = float(os.getenv("TRADE_SIZE_PERCENT", "2"))
-MAX_OPEN_TRADES       = int(os.getenv("MAX_OPEN_TRADES", "5"))
+MAX_OPEN_TRADES       = int(os.getenv("MAX_OPEN_TRADES", "0"))
 PENDING_EXPIRY_CHECKS = int(os.getenv("PENDING_EXPIRY_CHECKS", "96"))
 LEVERAGE              = int(os.getenv("LEVERAGE", "10"))
 
