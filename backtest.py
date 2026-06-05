@@ -57,6 +57,7 @@ from config import (
     HTF_TIMEFRAME, HTF_EMA_PERIOD, ADX_PERIOD, ADX_MIN,
     RSI_PERIOD, CRASH_LOW_LOOKBACK, PUMP_HIGH_LOOKBACK,
     COMMISSION_MAKER, COMMISSION_TAKER, BREAKEVEN_THRESHOLD, TRAILING_STOP, TRAILING_MULT,
+    TRAIL_LOCK_TRIGGER, TRAIL_LOCK_TARGET,
     BOUNCE_CONFIRM, FIXED_RISK_MODE, RISK_PER_TRADE_PERCENT,
     MAX_TRADE_SIZE_PERCENT, HTF_SR_CANDLES, HTF_SR_REQUIRE_CONFIRM,
     EMA_CONFLUENCE_PERIODS, FVG_LOOKBACK, FVG_MIN_GAP_PCT,
@@ -440,6 +441,8 @@ def phase2_simulate(
         max_trade_size_percent = MAX_TRADE_SIZE_PERCENT,
         trailing_stop          = TRAILING_STOP,
         trailing_mult          = TRAILING_MULT,
+        trail_lock_trigger     = TRAIL_LOCK_TRIGGER,
+        trail_lock_target      = TRAIL_LOCK_TARGET,
     )
 
     equity_log: List[Dict]       = []

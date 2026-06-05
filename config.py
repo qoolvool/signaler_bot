@@ -91,6 +91,8 @@ LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "2"))
 LONG_HTF_RSI_MIN         = float(os.getenv("LONG_HTF_RSI_MIN", "50.0"))
 HTF_BELOW_EMA_MAX        = int(os.getenv("HTF_BELOW_EMA_MAX", "2"))
 BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
+TRAIL_LOCK_TRIGGER       = float(os.getenv("TRAIL_LOCK_TRIGGER", "0.75"))
+TRAIL_LOCK_TARGET        = float(os.getenv("TRAIL_LOCK_TARGET",  "0.50"))
 STRUCTURAL_SL            = os.getenv("STRUCTURAL_SL", "true").lower() == "true"
 STRUCTURAL_SL_BUFFER     = float(os.getenv("STRUCTURAL_SL_BUFFER", "0.3"))
 STRUCTURAL_SL_LOOKBACK   = int(os.getenv("STRUCTURAL_SL_LOOKBACK", "20"))
