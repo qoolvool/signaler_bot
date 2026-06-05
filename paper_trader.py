@@ -31,7 +31,7 @@ _TRADE_HEADERS = [
     "id", "pair", "direction", "entry_price", "sl", "tp",
     "size_usd", "notional", "leverage", "risk_pct", "reward_pct", "rr",
     "opened_at", "closed_at", "close_price", "close_reason",
-    "pnl_usd", "pnl_percent", "commission", "sl_at_breakeven", "sl_at_half_tp",
+    "pnl_usd", "pnl_percent", "commission", "sl_at_breakeven",
     "trail_dist", "peak_price", "status",
 ]
 
@@ -63,8 +63,6 @@ class PaperPortfolio:
         max_trade_size_percent: float = 20.0,
         trailing_stop: bool = False,
         trailing_mult: float = 1.0,
-        trail_lock_trigger: float = 0.75,
-        trail_lock_target: float = 0.50,
     ):
         self.initial_balance        = initial_balance
         self.trade_size_percent     = trade_size_percent
@@ -79,8 +77,6 @@ class PaperPortfolio:
         self.max_trade_size_percent = max_trade_size_percent
         self.trailing_stop          = trailing_stop
         self.trailing_mult          = trailing_mult
-        self.trail_lock_trigger     = trail_lock_trigger
-        self.trail_lock_target      = trail_lock_target
 
         self.balance: float             = initial_balance
         self.trades: List[Dict]         = []
@@ -224,8 +220,6 @@ class PaperPortfolio:
                 # Boolean field: GSheets хранит как строку "True"/"False"
                 raw_be = t.get("sl_at_breakeven")
                 t["sl_at_breakeven"] = str(raw_be).lower() in ("true", "1") if raw_be else False
-                raw_hl = t.get("sl_at_half_tp")
-                t["sl_at_half_tp"] = str(raw_hl).lower() in ("true", "1") if raw_hl else False
                 self.trades.append(t)
 
             logger.info(
@@ -503,7 +497,6 @@ class PaperPortfolio:
             "pnl_percent":     None,
             "commission":      None,
             "sl_at_breakeven": False,
-            "sl_at_half_tp":   False,
             "trail_dist":      order.get("trail_dist", 0.0),
             "peak_price":      order["entry_price"],
             "status":          "OPEN",
@@ -523,67 +516,39 @@ class PaperPortfolio:
         candle_high: float,
         candle_low: float,
     ) -> List[Dict]:
-        """Move SL to entry at breakeven_threshold of TP, then to trail_lock_target at trail_lock_trigger."""
+        """Переносит SL в безубыток когда цена прошла breakeven_threshold пути к TP."""
         moved = []
         for trade in self.open_trades:
-            if trade["pair"] != pair:
+            if trade["pair"] != pair or trade.get("sl_at_breakeven"):
                 continue
             entry = trade["entry_price"]
             tp    = trade["tp"]
-
             if trade["direction"] == "LONG":
-                dist = tp - entry
-                if not trade.get("sl_at_breakeven"):
-                    if candle_high >= entry + dist * self.breakeven_threshold:
-                        new_sl = max(entry, trade["sl"])
-                        trade["sl_at_breakeven"] = True
-                        self._trades_dirty = True
-                        if new_sl > trade["sl"]:
-                            trade["sl"] = new_sl
-                            moved.append(trade)
-                            logger.info(
-                                "BE #%s %s %s: SL перенесён → %.6f",
-                                trade["id"], trade["direction"], trade["pair"], new_sl,
-                            )
-                if not trade.get("sl_at_half_tp"):
-                    if candle_high >= entry + dist * self.trail_lock_trigger:
-                        new_sl = round(entry + dist * self.trail_lock_target, 8)
-                        if new_sl > trade["sl"]:
-                            trade["sl"] = new_sl
-                            trade["sl_at_half_tp"] = True
-                            self._trades_dirty = True
-                            moved.append(trade)
-                            logger.info(
-                                "Lock #%s %s %s: SL перенесён → %.6f (50%% TP)",
-                                trade["id"], trade["direction"], trade["pair"], new_sl,
-                            )
+                target = entry + (tp - entry) * self.breakeven_threshold
+                if candle_high >= target:
+                    new_sl = max(entry, trade["sl"])
+                    trade["sl_at_breakeven"] = True
+                    self._trades_dirty       = True
+                    if new_sl > trade["sl"]:
+                        trade["sl"] = new_sl
+                        moved.append(trade)
+                        logger.info(
+                            "BE #%s %s %s: SL перенесён → %.6f",
+                            trade["id"], trade["direction"], trade["pair"], new_sl,
+                        )
             else:
-                dist = entry - tp
-                if not trade.get("sl_at_breakeven"):
-                    if candle_low <= entry - dist * self.breakeven_threshold:
-                        new_sl = min(entry, trade["sl"])
-                        trade["sl_at_breakeven"] = True
-                        self._trades_dirty = True
-                        if new_sl < trade["sl"]:
-                            trade["sl"] = new_sl
-                            moved.append(trade)
-                            logger.info(
-                                "BE #%s %s %s: SL перенесён → %.6f",
-                                trade["id"], trade["direction"], trade["pair"], new_sl,
-                            )
-                if not trade.get("sl_at_half_tp"):
-                    if candle_low <= entry - dist * self.trail_lock_trigger:
-                        new_sl = round(entry - dist * self.trail_lock_target, 8)
-                        if new_sl < trade["sl"]:
-                            trade["sl"] = new_sl
-                            trade["sl_at_half_tp"] = True
-                            self._trades_dirty = True
-                            moved.append(trade)
-                            logger.info(
-                                "Lock #%s %s %s: SL перенесён → %.6f (50%% TP)",
-                                trade["id"], trade["direction"], trade["pair"], new_sl,
-                            )
-
+                target = entry - (entry - tp) * self.breakeven_threshold
+                if candle_low <= target:
+                    new_sl = min(entry, trade["sl"])
+                    trade["sl_at_breakeven"] = True
+                    self._trades_dirty       = True
+                    if new_sl < trade["sl"]:
+                        trade["sl"] = new_sl
+                        moved.append(trade)
+                        logger.info(
+                            "BE #%s %s %s: SL перенесён → %.6f",
+                            trade["id"], trade["direction"], trade["pair"], new_sl,
+                        )
         if self._trades_dirty:
             self._save()
         return moved

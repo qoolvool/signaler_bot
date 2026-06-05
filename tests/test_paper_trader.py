@@ -189,21 +189,8 @@ class TestCheckBreakeven:
         p = _portfolio()
         self._open_trade(p, "LONG", entry=100.0, sl=90.0, tp=120.0)
         p.check_breakeven("BTC/USDT", candle_high=112.0, candle_low=105.0)
-        moved2 = p.check_breakeven("BTC/USDT", candle_high=112.0, candle_low=108.0)
+        moved2 = p.check_breakeven("BTC/USDT", candle_high=115.0, candle_low=112.0)
         assert moved2 == []
-
-    def test_long_phase2_triggers_at_75pct(self):
-        p = _portfolio(trail_lock_trigger=0.75, trail_lock_target=0.50)
-        self._open_trade(p, "LONG", entry=100.0, sl=90.0, tp=120.0)
-        moved = p.check_breakeven("BTC/USDT", candle_high=116.0, candle_low=110.0)
-        assert any(t.get("sl_at_half_tp") for t in p.trades)
-        assert p.trades[0]["sl"] == pytest.approx(110.0)
-
-    def test_long_phase2_no_trigger_before_threshold(self):
-        p = _portfolio(trail_lock_trigger=0.75, trail_lock_target=0.50)
-        self._open_trade(p, "LONG", entry=100.0, sl=90.0, tp=120.0)
-        p.check_breakeven("BTC/USDT", candle_high=114.0, candle_low=108.0)
-        assert not p.trades[0].get("sl_at_half_tp")
 
 
 # ── check_trailing_stop ────────────────────────────────────────────────────────

@@ -136,7 +136,7 @@ class TestCloseTradeCorruptEntry:
             "opened_at": "2024-01-01 00:00:00 UTC", "closed_at": None,
             "close_price": None, "close_reason": None,
             "pnl_usd": None, "pnl_percent": None, "commission": None,
-            "sl_at_breakeven": False, "sl_at_half_tp": False, "trail_dist": 0.0, "peak_price": 0.0,
+            "sl_at_breakeven": False, "trail_dist": 0.0, "peak_price": 0.0,
             "status": "OPEN",
         }
         p.trades.append(trade)
@@ -154,7 +154,7 @@ class TestCloseTradeCorruptEntry:
             "opened_at": "2024-01-01 00:00:00 UTC", "closed_at": None,
             "close_price": None, "close_reason": None,
             "pnl_usd": None, "pnl_percent": None, "commission": None,
-            "sl_at_breakeven": False, "sl_at_half_tp": False, "trail_dist": 0.0, "peak_price": None,
+            "sl_at_breakeven": False, "trail_dist": 0.0, "peak_price": None,
             "status": "OPEN",
         }
         p.trades.append(trade)
