@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 TRADING_PAIRS = [
     p.strip() for p in os.getenv("TRADING_PAIRS", (
-        # 12 пар из разных секторов — минимальная межсекторная корреляция
+        # 15 пар из разных секторов — минимальная межсекторная корреляция
         "BTC/USDT,"   # цифровое золото / benchmark
         "ETH/USDT,"   # L1 / DeFi-база
         "SOL/USDT,"   # high-perf L1
@@ -29,7 +29,10 @@ TRADING_PAIRS = [
         "ATOM/USDT,"  # межсетевое взаимодействие
         "TON/USDT,"   # мессенджер-экосистема
         "SUI/USDT,"   # новый L1
-        "LTC/USDT"    # Bitcoin-proxy с отдельной динамикой
+        "LTC/USDT,"   # Bitcoin-proxy с отдельной динамикой
+        "DOGE/USDT,"  # meme / высокая ликвидность
+        "ADA/USDT,"   # L1 / proof-of-stake
+        "AVAX/USDT"   # high-perf L1 / суbnets
     )).split(",")
     if p.strip()
 ]
