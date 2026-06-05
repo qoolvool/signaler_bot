@@ -250,7 +250,7 @@ class TestHtfRsiPassthrough:
         current = float(df["close"].iloc[-1])
         levels = [
             {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
-             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
+             "confluence_score": 3, "confluence_tags": ["EMA21", "FVG", "HTF_SR"]},
             {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
              "confluence_score": 0, "confluence_tags": []},
         ]
@@ -280,7 +280,7 @@ class TestChoppyAtrRatioFilter:
         current = float(df["close"].iloc[-1])
         levels = [
             {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
-             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
+             "confluence_score": 3, "confluence_tags": ["EMA21", "FVG", "HTF_SR"]},
             {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
              "confluence_score": 0, "confluence_tags": []},
         ]
@@ -303,7 +303,7 @@ class TestChoppyAtrRatioFilter:
         current = float(df["close"].iloc[-1])
         levels = [
             {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
-             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
+             "confluence_score": 3, "confluence_tags": ["EMA21", "FVG", "HTF_SR"]},
             {"price": round(current * 1.15, 2),  "type": "RESISTANCE", "touches": 3,
              "confluence_score": 0, "confluence_tags": []},
         ]
