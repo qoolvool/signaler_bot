@@ -383,7 +383,8 @@ class PaperPortfolio:
             size_usd = risk_amount / (sl_pct * self.leverage)
             size_usd = min(size_usd, self.balance * self.max_trade_size_percent / 100.0)
         else:
-            size_usd = self.balance * self.trade_size_percent / 100.0
+            size_usd = self.balance * self.trade_size_percent / 100.0 * risk_mult
+            size_usd = min(size_usd, self.balance * self.max_trade_size_percent / 100.0)
         size_usd = round(min(size_usd, self.balance), 2)
         notional   = round(size_usd * self.leverage, 2)
         risk_pct   = round(sl_pct * 100, 2)
