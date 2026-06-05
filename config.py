@@ -17,22 +17,20 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 TRADING_PAIRS = [
     p.strip() for p in os.getenv("TRADING_PAIRS", (
-        # 15 пар из разных секторов — минимальная межсекторная корреляция
+        # 13 пар — убраны BNB (exchange token, не уважает уровни) и RNDR (стабильно убыточен)
         "BTC/USDT,"   # цифровое золото / benchmark
         "ETH/USDT,"   # L1 / DeFi-база
         "SOL/USDT,"   # high-perf L1
         "XRP/USDT,"   # payments / регуляторный сектор
-        "BNB/USDT,"   # exchange token
         "LINK/USDT,"  # oracle / инфраструктура
         "ARB/USDT,"   # L2 экосистема Ethereum
-        "RNDR/USDT,"  # AI / GPU compute
         "ATOM/USDT,"  # межсетевое взаимодействие
         "TON/USDT,"   # мессенджер-экосистема
         "SUI/USDT,"   # новый L1
         "LTC/USDT,"   # Bitcoin-proxy с отдельной динамикой
         "DOGE/USDT,"  # meme / высокая ликвидность
         "ADA/USDT,"   # L1 / proof-of-stake
-        "AVAX/USDT"   # high-perf L1 / суbnets
+        "AVAX/USDT"   # high-perf L1 / subnets
     )).split(",")
     if p.strip()
 ]
@@ -89,7 +87,7 @@ RR_MAX                   = float(os.getenv("RR_MAX", "8.0"))
 MAX_SL_PERCENT           = float(os.getenv("MAX_SL_PERCENT", "3.5"))
 LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "3"))
 LONG_HTF_RSI_MIN         = float(os.getenv("LONG_HTF_RSI_MIN", "50.0"))
-HTF_BELOW_EMA_MAX        = int(os.getenv("HTF_BELOW_EMA_MAX", "1"))
+HTF_BELOW_EMA_MAX        = int(os.getenv("HTF_BELOW_EMA_MAX", "2"))
 BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
 STRUCTURAL_SL            = os.getenv("STRUCTURAL_SL", "true").lower() == "true"
 STRUCTURAL_SL_BUFFER     = float(os.getenv("STRUCTURAL_SL_BUFFER", "0.3"))
