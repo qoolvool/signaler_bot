@@ -89,7 +89,7 @@ RR_MAX                   = float(os.getenv("RR_MAX", "8.0"))
 MAX_SL_PERCENT           = float(os.getenv("MAX_SL_PERCENT", "3.5"))
 LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "3"))
 LONG_HTF_RSI_MIN         = float(os.getenv("LONG_HTF_RSI_MIN", "50.0"))
-HTF_BELOW_EMA_MAX        = int(os.getenv("HTF_BELOW_EMA_MAX", "2"))
+HTF_BELOW_EMA_MAX        = int(os.getenv("HTF_BELOW_EMA_MAX", "1"))
 BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
 STRUCTURAL_SL            = os.getenv("STRUCTURAL_SL", "true").lower() == "true"
 STRUCTURAL_SL_BUFFER     = float(os.getenv("STRUCTURAL_SL_BUFFER", "0.3"))
