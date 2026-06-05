@@ -99,7 +99,7 @@ TRAILING_STOP = os.getenv("TRAILING_STOP", "true").lower() == "true"
 TRAILING_MULT = float(os.getenv("TRAILING_MULT", "1.2"))
 
 BOUNCE_CONFIRM         = os.getenv("BOUNCE_CONFIRM", "true").lower() == "true"
-FIXED_RISK_MODE        = os.getenv("FIXED_RISK_MODE", "false").lower() == "true"
+FIXED_RISK_MODE        = os.getenv("FIXED_RISK_MODE", "true").lower() == "true"
 RISK_PER_TRADE_PERCENT = float(os.getenv("RISK_PER_TRADE_PERCENT", "1.0"))
 MAX_TRADE_SIZE_PERCENT = float(os.getenv("MAX_TRADE_SIZE_PERCENT", "10.0"))
 
