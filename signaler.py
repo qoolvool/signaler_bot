@@ -105,6 +105,8 @@ portfolio = PaperPortfolio(
     max_trade_size_percent=MAX_TRADE_SIZE_PERCENT,
     trailing_stop=TRAILING_STOP,
     trailing_mult=TRAILING_MULT,
+    trail_lock_trigger=TRAIL_LOCK_TRIGGER,
+    trail_lock_target=TRAIL_LOCK_TARGET,
 )
 
 # ============================================================
