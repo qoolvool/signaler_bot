@@ -125,7 +125,7 @@ CORR_MAX      = float(os.getenv("CORR_MAX", "0.75"))
 INITIAL_BALANCE       = float(os.getenv("INITIAL_BALANCE", "1000"))
 TRADE_SIZE_PERCENT    = float(os.getenv("TRADE_SIZE_PERCENT", "1.0"))
 MAX_OPEN_TRADES       = int(os.getenv("MAX_OPEN_TRADES", "0"))
-PENDING_EXPIRY_CHECKS = int(os.getenv("PENDING_EXPIRY_CHECKS", "168"))
+PENDING_EXPIRY_CHECKS = int(os.getenv("PENDING_EXPIRY_CHECKS", "96"))
 LEVERAGE              = int(os.getenv("LEVERAGE", "10"))
 
 logger = logging.getLogger("signaler")
