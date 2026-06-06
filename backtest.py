@@ -113,11 +113,12 @@ def _null_ctx():
 def _precompute_macro_trends(
     df_4h: pd.DataFrame,
     ema_period: int = MACRO_EMA_PERIOD,
-) -> Dict[pd.Timestamp, str]:
+) -> Dict:
     """
-    Compute daily EMA{ema_period} trend for every 4h timestamp using only
-    past data (previous day's close vs EMA) — no look-ahead bias.
-    Returns dict: ts → "UP" | "DOWN".
+    Compute daily EMA{ema_period} trend keyed by Python date.
+    Lookup: macro_trend_map[pair].get(ts.date())
+    Each date's value is set from the previous day's close vs EMA to
+    avoid look-ahead bias (negligible for EMA200 but kept for correctness).
     """
     if df_4h is None or df_4h.empty:
         return {}
@@ -125,18 +126,15 @@ def _precompute_macro_trends(
     if len(daily) < ema_period:
         return {}
     ema_s = daily.ewm(span=ema_period, adjust=False).mean()
-    daily_arr = daily.values
-    ema_arr   = ema_s.values
-    daily_idx = daily.index
-
-    result: Dict[pd.Timestamp, str] = {}
-    for ts in df_4h.index:
-        # Use previous completed day (normalize to midnight then go one day back)
-        ts_day = pd.Timestamp(ts.date(), tz="UTC")
-        pos = int(daily_idx.searchsorted(ts_day, side="left")) - 1
-        if pos < ema_period - 1:  # not enough history yet for a reliable EMA
+    result = {}
+    for i, (day_ts, close_val, ema_val) in enumerate(
+        zip(daily.index, daily.values, ema_s.values)
+    ):
+        if i < ema_period - 1:  # not enough history for reliable EMA
             continue
-        result[ts] = "UP" if daily_arr[pos] > ema_arr[pos] else "DOWN"
+        # Store under next day's date: signal fires on the following trading day
+        next_date = (day_ts + pd.Timedelta(days=1)).date()
+        result[next_date] = "UP" if close_val > ema_val else "DOWN"
     return result
 
 
@@ -591,7 +589,7 @@ def phase2_simulate(
                 if last is not None and (ts - last) < analysis_interval:
                     continue
                 last_analysis[pair] = ts
-                macro_t = macro_trend_map.get(pair, {}).get(ts)
+                macro_t = macro_trend_map.get(pair, {}).get(ts.date())
                 analysis_tasks.append((pair, df, _slice_4h(pair, ts), macro_t))
 
             # Pass 2: run analysis in parallel, apply orders sequentially
