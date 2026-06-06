@@ -62,6 +62,11 @@ HTF_EMA_PERIOD = int(os.getenv("HTF_EMA_PERIOD", "50"))
 ADX_PERIOD     = int(os.getenv("ADX_PERIOD", "14"))
 ADX_MIN        = float(os.getenv("ADX_MIN", "20"))
 
+# Macro trend filter: daily EMA200. Blocks longs in macro downtrend and shorts in macro uptrend.
+# Computed by resampling already-downloaded 4h data to daily — no extra API call.
+MACRO_EMA_PERIOD   = int(os.getenv("MACRO_EMA_PERIOD", "200"))
+MACRO_TREND_FILTER = os.getenv("MACRO_TREND_FILTER", "true").lower() == "true"
+
 RSI_PERIOD            = int(os.getenv("RSI_PERIOD", "14"))
 RSI_OVERSOLD          = float(os.getenv("RSI_OVERSOLD", "30"))
 RSI_RECOVERY_MAX      = float(os.getenv("RSI_RECOVERY_MAX", "47"))

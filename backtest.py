@@ -50,7 +50,7 @@ except ImportError:
 
 # ── Bot modules ──────────────────────────────────────────────────────────────
 from config import (
-    TRADING_PAIRS, CANDLES_LIMIT, TOLERANCE_PERCENT,
+    TRADING_PAIRS, CANDLES_LIMIT, TOLERANCE_PERCENT, MACRO_EMA_PERIOD, MACRO_TREND_FILTER,
     EXTREMA_WINDOW, TOP_N_LEVELS, MIN_TOUCHES, HTF_STRUCTURE_WINDOW,
     ENTRY_PROXIMITY_PERCENT, EMA_PERIOD,
     ATR_PERIOD, SL_ATR_MULT, TP_ATR_MIN_MULT, MIN_RR,
@@ -104,6 +104,40 @@ from contextlib import contextmanager
 def _null_ctx():
     """No-op context manager used in place of ProcessPoolExecutor when workers=1."""
     yield None
+
+
+# ============================================================
+# MACRO TREND — daily EMA from resampled 4h data
+# ============================================================
+
+def _precompute_macro_trends(
+    df_4h: pd.DataFrame,
+    ema_period: int = MACRO_EMA_PERIOD,
+) -> Dict[pd.Timestamp, str]:
+    """
+    Compute daily EMA{ema_period} trend for every 4h timestamp using only
+    past data (previous day's close vs EMA) — no look-ahead bias.
+    Returns dict: ts → "UP" | "DOWN".
+    """
+    if df_4h is None or df_4h.empty:
+        return {}
+    daily = df_4h["close"].resample("1D").last().dropna()
+    if len(daily) < ema_period:
+        return {}
+    ema_s = daily.ewm(span=ema_period, adjust=False).mean()
+    daily_arr = daily.values
+    ema_arr   = ema_s.values
+    daily_idx = daily.index
+
+    result: Dict[pd.Timestamp, str] = {}
+    for ts in df_4h.index:
+        # Use previous completed day (normalize to midnight then go one day back)
+        ts_day = pd.Timestamp(ts.date(), tz="UTC")
+        pos = int(daily_idx.searchsorted(ts_day, side="left")) - 1
+        if pos < ema_period - 1:  # not enough history yet for a reliable EMA
+            continue
+        result[ts] = "UP" if daily_arr[pos] > ema_arr[pos] else "DOWN"
+    return result
 
 
 # ============================================================
@@ -308,7 +342,7 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
     Runs in a worker process — no shared portfolio state.
     Returns (pair, signals, returns_series).
     """
-    pair, df_1h, df_4h = args
+    pair, df_1h, df_4h, macro_trend = args
     htf_trend, htf_ema, htf_sr, htf_structure, htf_rsi, htf_below_ema = _htf_from_df(df_4h)
     levels    = find_support_resistance(df_1h)
     ema_lvls  = _calc_ema_levels(df_1h, EMA_CONFLUENCE_PERIODS)
@@ -337,6 +371,7 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
         crash_low=crash_low, pump_high=pump_high,
         htf_structure=htf_structure, rsi_series=rsi_series, htf_rsi=htf_rsi,
         atr_ratio=atr_ratio, adx_series=adx_s, htf_below_ema=htf_below_ema,
+        macro_trend=macro_trend,
     )
     returns = df_1h["close"].pct_change().dropna().tail(CORR_LOOKBACK)
     return pair, signals, returns
@@ -458,6 +493,15 @@ def phase2_simulate(
     }
     HTF_TAIL = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
 
+    # ── Precompute macro trend (daily EMA200 from 4h data) ────
+    macro_trend_map: Dict[str, Dict[pd.Timestamp, str]] = {}
+    if MACRO_TREND_FILTER:
+        for p in active:
+            if data_4h.get(p) is not None:
+                macro_trend_map[p] = _precompute_macro_trends(data_4h[p])
+        logger.info("Macro trend maps built for %d pairs (daily EMA%d)",
+                    len(macro_trend_map), MACRO_EMA_PERIOD)
+
     # ── Portfolio ──────────────────────────────────────────────
     pf = BacktestPortfolio(
         initial_balance        = INITIAL_BALANCE,
@@ -547,7 +591,8 @@ def phase2_simulate(
                 if last is not None and (ts - last) < analysis_interval:
                     continue
                 last_analysis[pair] = ts
-                analysis_tasks.append((pair, df, _slice_4h(pair, ts)))
+                macro_t = macro_trend_map.get(pair, {}).get(ts)
+                analysis_tasks.append((pair, df, _slice_4h(pair, ts), macro_t))
 
             # Pass 2: run analysis in parallel, apply orders sequentially
             if analysis_tasks:

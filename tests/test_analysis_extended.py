@@ -362,24 +362,24 @@ class TestFetchHtfConfluenceReturn:
         client.fetch_ohlcv.return_value = raw
         return client
 
-    def test_returns_six_tuple(self):
+    def test_returns_seven_tuple(self):
         client = self._mock_client(100)
         result = an._fetch_htf_confluence(client, "BTC/USDT")
-        assert len(result) == 6
+        assert len(result) == 7
 
     def test_htf_rsi_is_float_or_none(self):
         client = self._mock_client(100)
-        _, _, _, _, htf_rsi, _ = an._fetch_htf_confluence(client, "BTC/USDT")
+        _, _, _, _, htf_rsi, _, _ = an._fetch_htf_confluence(client, "BTC/USDT")
         assert htf_rsi is None or isinstance(htf_rsi, float)
 
     def test_empty_response_returns_nones(self):
         client = MagicMock()
         client.fetch_ohlcv.return_value = []
         result = an._fetch_htf_confluence(client, "BTC/USDT")
-        assert result == (None, None, [], "RANGE", None, None)
+        assert result == (None, None, [], "RANGE", None, None, None)
 
     def test_exception_returns_nones(self):
         client = MagicMock()
         client.fetch_ohlcv.side_effect = Exception("network error")
         result = an._fetch_htf_confluence(client, "BTC/USDT")
-        assert result == (None, None, [], "RANGE", None, None)
+        assert result == (None, None, [], "RANGE", None, None, None)
