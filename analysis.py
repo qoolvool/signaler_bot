@@ -25,7 +25,7 @@ from config import (
     STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
     QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
     MACRO_TREND_FILTER,
-    EFFICIENCY_FILTER, EFFICIENCY_PERIOD, EFFICIENCY_MIN,
+    EFFICIENCY_FILTER, EFFICIENCY_PERIOD, EFFICIENCY_MAX,
 )
 from indicators import (
     _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series,
@@ -546,12 +546,12 @@ def find_entry_signals(
     special    = recovery or correction
 
     if not special:
-        # Efficiency Ratio gate: pullback entries only pay off in a real trend.
-        # Low ER ⇒ choppy/flat market where S/R levels are noise (the failure regime).
-        if EFFICIENCY_FILTER and EFFICIENCY_MIN > 0:
+        # Efficiency Ratio gate: S/R bounces work in ranges and fail in trends.
+        # High ER ⇒ price moving too directionally → levels get blown through.
+        if EFFICIENCY_FILTER and EFFICIENCY_MAX > 0:
             er = _calc_efficiency_ratio(df["close"], EFFICIENCY_PERIOD)
-            if er < EFFICIENCY_MIN:
-                logger.info("ER %.2f < %.2f — флэт, откатные сигналы пропущены", er, EFFICIENCY_MIN)
+            if er > EFFICIENCY_MAX:
+                logger.info("ER %.2f > %.2f — тренд, откатные сигналы пропущены", er, EFFICIENCY_MAX)
                 return []
         # ATR choppy filter: reject if current volatility is far below its average
         if CHOPPY_ATR_MIN > 0 and atr_ratio < CHOPPY_ATR_MIN:

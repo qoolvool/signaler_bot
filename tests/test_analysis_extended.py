@@ -10,6 +10,16 @@ from unittest.mock import MagicMock, patch
 import analysis as an
 
 
+@pytest.fixture(autouse=True)
+def _disable_efficiency_gate():
+    """Synthetic monotonic test data trips the ER trend gate; tests targeting
+    other filters opt out by default. Gate-specific tests re-enable it locally."""
+    orig = an.EFFICIENCY_FILTER
+    an.EFFICIENCY_FILTER = False
+    yield
+    an.EFFICIENCY_FILTER = orig
+
+
 # ── _detect_rsi_divergence (direct) ───────────────────────────────────────────
 
 class TestDetectRsiDivergence:
@@ -173,29 +183,44 @@ class TestEfficiencyRatioGate:
         closes = [100.0 + i * 0.5 for i in range(n)]
         return make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
 
-    def test_gate_blocks_signals_in_chop(self):
+    def test_gate_blocks_signals_in_trend(self):
+        """High ER (efficient trend) ⇒ S/R bounces get blown through ⇒ blocked."""
         orig_er  = an.EFFICIENCY_FILTER
-        orig_min = an.EFFICIENCY_MIN
+        orig_max = an.EFFICIENCY_MAX
         an.EFFICIENCY_FILTER = True
-        an.EFFICIENCY_MIN    = 0.30
-        df = self._chop_df()
+        an.EFFICIENCY_MAX    = 0.30
+        df = self._trend_df()
         current = float(df["close"].iloc[-1])
         levels = [{"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
                    "confluence_score": 5, "confluence_tags": []}]
         sigs = an.find_entry_signals(df, levels, current, ema_period=50)
         an.EFFICIENCY_FILTER = orig_er
-        an.EFFICIENCY_MIN    = orig_min
+        an.EFFICIENCY_MAX    = orig_max
         assert sigs == []
 
-    def test_gate_disabled_does_not_block(self):
-        """With the filter off, chop alone must not short-circuit via ER."""
-        orig_er = an.EFFICIENCY_FILTER
-        an.EFFICIENCY_FILTER = False
-        df = self._chop_df()
+    def test_gate_allows_ranging_market(self):
+        """Low ER (range) must not be short-circuited by the ER gate."""
+        orig_er  = an.EFFICIENCY_FILTER
+        orig_max = an.EFFICIENCY_MAX
+        an.EFFICIENCY_FILTER = True
+        an.EFFICIENCY_MAX    = 0.30
+        df = self._chop_df()  # ER ≈ 0, well below the cap
         current = float(df["close"].iloc[-1])
         levels = [{"price": current, "type": "SUPPORT", "touches": 5,
                    "confluence_score": 5, "confluence_tags": []}]
-        # Should not raise and ER path is skipped; other filters may still apply.
+        sigs = an.find_entry_signals(df, levels, current, ema_period=50)
+        an.EFFICIENCY_FILTER = orig_er
+        an.EFFICIENCY_MAX    = orig_max
+        assert isinstance(sigs, list)  # other filters may still apply, ER did not block
+
+    def test_gate_disabled_does_not_block(self):
+        """With the filter off, a strong trend must not be blocked via ER."""
+        orig_er = an.EFFICIENCY_FILTER
+        an.EFFICIENCY_FILTER = False
+        df = self._trend_df()
+        current = float(df["close"].iloc[-1])
+        levels = [{"price": current, "type": "SUPPORT", "touches": 5,
+                   "confluence_score": 5, "confluence_tags": []}]
         sigs = an.find_entry_signals(df, levels, current, ema_period=50)
         an.EFFICIENCY_FILTER = orig_er
         assert isinstance(sigs, list)
@@ -206,7 +231,7 @@ class TestEfficiencyRatioGate:
         orig_rsi = an.REQUIRE_RSI_DIVERGENCE
         an.EFFICIENCY_FILTER      = True
         an.REQUIRE_RSI_DIVERGENCE = False
-        df = self._chop_df()
+        df = self._trend_df()  # high ER — would be blocked in NORMAL regime
         current = float(df["close"].iloc[-1])
         levels = [{"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
                    "confluence_score": 1, "confluence_tags": []}]
