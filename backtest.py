@@ -395,6 +395,7 @@ def phase2_simulate(
     Returns (portfolio, equity_log).
     workers=0 → auto (min(pairs, cpu_count)); workers=1 → single-process.
     """
+    _returns_cache.clear()  # ensure no stale correlation data from prior runs
     # ── Load cached data ──────────────────────────────────────
     logger.info("=== PHASE 2: Loading data ===")
     data_1h: Dict[str, pd.DataFrame] = {}
