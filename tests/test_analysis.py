@@ -9,6 +9,16 @@ from conftest import make_df, sine_df
 import analysis as an
 
 
+@pytest.fixture(autouse=True)
+def _disable_efficiency_gate():
+    """Synthetic monotonic test data trips the ER trend gate; tests targeting
+    other filters opt out by default. Gate-specific tests re-enable it locally."""
+    orig = an.EFFICIENCY_FILTER
+    an.EFFICIENCY_FILTER = False
+    yield
+    an.EFFICIENCY_FILTER = orig
+
+
 # ── _find_local_extrema ────────────────────────────────────────────────────────
 
 class TestFindLocalExtrema:

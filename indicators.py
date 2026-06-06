@@ -90,7 +90,7 @@ def _calc_efficiency_ratio(close: pd.Series, period: int = 20) -> float:
     """
     Kaufman Efficiency Ratio over `period` bars: 0 = чистый флэт, 1 = чистый тренд.
     ER = |чистое изменение| / Σ|пошаговых изменений|. Гейт для откатных входов:
-    откат по тренду окупается только когда цена реально движется направленно.
+    отскоки от S/R работают в боковике (низкий ER) и проваливаются в тренде.
     """
     if len(close) < period + 1:
         return 0.0
