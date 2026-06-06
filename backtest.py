@@ -206,8 +206,21 @@ def phase1_download(
             path = _csv_path(pair, tf)
             if path.exists() and not force:
                 df = _load_df(path)
-                logger.info("  [CACHED] %-12s %-3s  %d candles", pair, tf, len(df))
-                continue
+                # Re-download if cached data starts later than requested by more than 30 days
+                if since_dt is not None and len(df) > 0:
+                    cache_start = df.index[0].to_pydatetime().replace(tzinfo=timezone.utc)
+                    if cache_start > since_dt + timedelta(days=30):
+                        logger.info(
+                            "  [STALE] %-12s %-3s  cache starts %s, need %s — re-downloading",
+                            pair, tf, cache_start.date(), since_dt.date(),
+                        )
+                    else:
+                        logger.info("  [CACHED] %-12s %-3s  %d candles  (%s → %s)",
+                                    pair, tf, len(df), df.index[0].date(), df.index[-1].date())
+                        continue
+                else:
+                    logger.info("  [CACHED] %-12s %-3s  %d candles", pair, tf, len(df))
+                    continue
             df = _download_pair(client, pair, tf, since_ms)
             if df is not None:
                 _save_df(df, path)
@@ -1032,8 +1045,8 @@ def main() -> None:
                     help="Years of history to download if --start-date not set (default: 4)")
     ap.add_argument("--start-date", type=str, default="2020-01-01",
                     help="Simulation start date YYYY-MM-DD (default: 2020-01-01)")
-    ap.add_argument("--end-date",   type=str, default="2024-12-31",
-                    help="Simulation end date YYYY-MM-DD (default: 2024-12-31)")
+    ap.add_argument("--end-date",   type=str, default="2024-01-01",
+                    help="Simulation end date YYYY-MM-DD (default: 2024-01-01)")
     ap.add_argument("--interval",   type=int, default=4,
                     help="Analysis interval in hours (default: 4; use 1 for max fidelity)")
     ap.add_argument("--pairs",      type=str, default=None,
