@@ -471,7 +471,7 @@ def phase2_simulate(
         all_ts = [ts for ts in all_ts if ts >= start_ts]
     if end_dt is not None:
         end_ts = pd.Timestamp(end_dt).tz_localize("UTC") if end_dt.tzinfo is None else pd.Timestamp(end_dt)
-        all_ts = [ts for ts in all_ts if ts <= end_ts]
+        all_ts = [ts for ts in all_ts if ts < end_ts + pd.Timedelta(days=1)]
     if not all_ts:
         logger.error("No candles in the requested date range.")
         sys.exit(1)

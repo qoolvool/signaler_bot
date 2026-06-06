@@ -99,6 +99,8 @@ def remove_duplicates(levels: List[Dict], tolerance: float) -> List[Dict]:
         return []
     unique: List[Dict] = []
     for level in sorted(levels, key=lambda x: x["touches"], reverse=True):
+        if not level.get("price") or level["price"] <= 0:
+            continue
         if not any(
             kept["type"] == level["type"]
             and kept["price"] > 0
@@ -281,9 +283,13 @@ def _fetch_htf_confluence(client, pair: str):
         macro_trend: Optional[str] = None
         if MACRO_TREND_FILTER:
             try:
-                raw_d = client.fetch_ohlcv(pair, "1d", limit=MACRO_EMA_PERIOD + 30)
+                raw_d = client.fetch_ohlcv(pair, "1d", limit=MACRO_EMA_PERIOD)
                 if raw_d and len(raw_d) >= MACRO_EMA_PERIOD:
-                    daily_closes = pd.Series([c[4] for c in raw_d], dtype=float)
+                    daily_closes = pd.Series(
+                        [c[4] for c in raw_d],
+                        index=pd.to_datetime([c[0] for c in raw_d], unit="ms", utc=True),
+                        dtype=float,
+                    )
                     ema_d = daily_closes.ewm(span=MACRO_EMA_PERIOD, adjust=False).mean()
                     macro_trend = "UP" if float(daily_closes.iloc[-1]) > float(ema_d.iloc[-1]) else "DOWN"
             except Exception:
@@ -349,7 +355,7 @@ def _detect_rsi_divergence(
     window: int = EXTREMA_WINDOW,
     proximity_pct: float = TOLERANCE_PERCENT,
 ) -> bool:
-    if not level_price:
+    if level_price is None or level_price <= 0:
         return False
     tol    = proximity_pct / 100.0 * 4
     n      = len(rsi_series)
