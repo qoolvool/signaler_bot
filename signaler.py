@@ -253,6 +253,7 @@ class _PairAnalysis(NamedTuple):
     regime:        str
     htf_structure: Optional[str]
     htf_rsi:       Optional[float]
+    macro_trend:   Optional[str] = None
 
 
 async def _compute_analysis(
@@ -266,8 +267,8 @@ async def _compute_analysis(
     fvg_zones = _find_fvg_zones(df, FVG_LOOKBACK, FVG_MIN_GAP_PCT)
     _add_confluence_scores(levels, ema_lvls, fvg_zones, TOLERANCE_PERCENT)
 
-    htf_trend, htf_ema, htf_sr, htf_structure, htf_rsi, htf_below_ema = await asyncio.to_thread(
-        _fetch_htf_confluence, client, pair,
+    htf_trend, htf_ema, htf_sr, htf_structure, htf_rsi, htf_below_ema, macro_trend = (
+        await asyncio.to_thread(_fetch_htf_confluence, client, pair)
     )
     if htf_sr:
         _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
@@ -282,12 +283,13 @@ async def _compute_analysis(
     pump_high  = _find_pump_high(df, PUMP_HIGH_LOOKBACK) if regime == "CORRECTION" else None
 
     logger.info(
-        "%s | HTF(%s)=%s  структура=%s  RSI4h=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s",
+        "%s | HTF(%s)=%s  структура=%s  RSI4h=%s  ADX=%s  RSI=%.1f  ATR×=%.1f  режим=%s  макро=%s",
         pair, HTF_TIMEFRAME, htf_trend or "N/A",
         htf_structure or "N/A",
         f"{htf_rsi:.1f}" if htf_rsi is not None else "N/A",
         f"{adx_val:.1f}" if adx_val is not None else "N/A",
         rsi_val, atr_ratio, regime,
+        macro_trend or "N/A",
     )
 
     signal_levels = (
@@ -307,6 +309,7 @@ async def _compute_analysis(
         htf_rsi=htf_rsi,
         atr_ratio=atr_ratio,
         htf_below_ema=htf_below_ema,
+        macro_trend=macro_trend,
     )
     return _PairAnalysis(
         levels=levels, signals=signals,
@@ -315,6 +318,7 @@ async def _compute_analysis(
         atr_ratio=atr_ratio, regime=regime,
         htf_structure=htf_structure,
         htf_rsi=htf_rsi,
+        macro_trend=macro_trend,
     )
 
 

@@ -50,7 +50,7 @@ except ImportError:
 
 # ── Bot modules ──────────────────────────────────────────────────────────────
 from config import (
-    TRADING_PAIRS, CANDLES_LIMIT, TOLERANCE_PERCENT,
+    TRADING_PAIRS, CANDLES_LIMIT, TOLERANCE_PERCENT, MACRO_EMA_PERIOD, MACRO_TREND_FILTER,
     EXTREMA_WINDOW, TOP_N_LEVELS, MIN_TOUCHES, HTF_STRUCTURE_WINDOW,
     ENTRY_PROXIMITY_PERCENT, EMA_PERIOD,
     ATR_PERIOD, SL_ATR_MULT, TP_ATR_MIN_MULT, MIN_RR,
@@ -104,6 +104,38 @@ from contextlib import contextmanager
 def _null_ctx():
     """No-op context manager used in place of ProcessPoolExecutor when workers=1."""
     yield None
+
+
+# ============================================================
+# MACRO TREND — daily EMA from resampled 4h data
+# ============================================================
+
+def _precompute_macro_trends(
+    df_4h: pd.DataFrame,
+    ema_period: int = MACRO_EMA_PERIOD,
+) -> Dict:
+    """
+    Compute daily EMA{ema_period} trend keyed by Python date.
+    Lookup: macro_trend_map[pair].get(ts.date())
+    Each date's value is set from the previous day's close vs EMA to
+    avoid look-ahead bias (negligible for EMA200 but kept for correctness).
+    """
+    if df_4h is None or df_4h.empty:
+        return {}
+    daily = df_4h["close"].resample("1D").last().dropna()
+    if len(daily) < ema_period:
+        return {}
+    ema_s = daily.ewm(span=ema_period, adjust=False).mean()
+    result = {}
+    for i, (day_ts, close_val, ema_val) in enumerate(
+        zip(daily.index, daily.values, ema_s.values)
+    ):
+        if i < ema_period - 1:  # not enough history for reliable EMA
+            continue
+        # Store under next day's date: signal fires on the following trading day
+        next_date = (day_ts + pd.Timedelta(days=1)).date()
+        result[next_date] = "UP" if close_val > ema_val else "DOWN"
+    return result
 
 
 # ============================================================
@@ -308,7 +340,7 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
     Runs in a worker process — no shared portfolio state.
     Returns (pair, signals, returns_series).
     """
-    pair, df_1h, df_4h = args
+    pair, df_1h, df_4h, macro_trend = args
     htf_trend, htf_ema, htf_sr, htf_structure, htf_rsi, htf_below_ema = _htf_from_df(df_4h)
     levels    = find_support_resistance(df_1h)
     ema_lvls  = _calc_ema_levels(df_1h, EMA_CONFLUENCE_PERIODS)
@@ -337,6 +369,7 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
         crash_low=crash_low, pump_high=pump_high,
         htf_structure=htf_structure, rsi_series=rsi_series, htf_rsi=htf_rsi,
         atr_ratio=atr_ratio, adx_series=adx_s, htf_below_ema=htf_below_ema,
+        macro_trend=macro_trend,
     )
     returns = df_1h["close"].pct_change().dropna().tail(CORR_LOOKBACK)
     return pair, signals, returns
@@ -438,7 +471,7 @@ def phase2_simulate(
         all_ts = [ts for ts in all_ts if ts >= start_ts]
     if end_dt is not None:
         end_ts = pd.Timestamp(end_dt).tz_localize("UTC") if end_dt.tzinfo is None else pd.Timestamp(end_dt)
-        all_ts = [ts for ts in all_ts if ts <= end_ts]
+        all_ts = [ts for ts in all_ts if ts < end_ts + pd.Timedelta(days=1)]
     if not all_ts:
         logger.error("No candles in the requested date range.")
         sys.exit(1)
@@ -457,6 +490,15 @@ def phase2_simulate(
         for p in active if data_4h.get(p) is not None
     }
     HTF_TAIL = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
+
+    # ── Precompute macro trend (daily EMA200 from 4h data) ────
+    macro_trend_map: Dict[str, Dict[pd.Timestamp, str]] = {}
+    if MACRO_TREND_FILTER:
+        for p in active:
+            if data_4h.get(p) is not None:
+                macro_trend_map[p] = _precompute_macro_trends(data_4h[p])
+        logger.info("Macro trend maps built for %d pairs (daily EMA%d)",
+                    len(macro_trend_map), MACRO_EMA_PERIOD)
 
     # ── Portfolio ──────────────────────────────────────────────
     pf = BacktestPortfolio(
@@ -547,7 +589,8 @@ def phase2_simulate(
                 if last is not None and (ts - last) < analysis_interval:
                     continue
                 last_analysis[pair] = ts
-                analysis_tasks.append((pair, df, _slice_4h(pair, ts)))
+                macro_t = macro_trend_map.get(pair, {}).get(ts.date())
+                analysis_tasks.append((pair, df, _slice_4h(pair, ts), macro_t))
 
             # Pass 2: run analysis in parallel, apply orders sequentially
             if analysis_tasks:

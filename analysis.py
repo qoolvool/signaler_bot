@@ -24,6 +24,7 @@ from config import (
     MAX_SL_PERCENT, LONG_MIN_CONFLUENCE, LONG_HTF_RSI_MIN, HTF_BELOW_EMA_MAX,
     STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
     QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
+    MACRO_TREND_FILTER,
 )
 from indicators import _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series
 
@@ -98,6 +99,8 @@ def remove_duplicates(levels: List[Dict], tolerance: float) -> List[Dict]:
         return []
     unique: List[Dict] = []
     for level in sorted(levels, key=lambda x: x["touches"], reverse=True):
+        if not level.get("price") or level["price"] <= 0:
+            continue
         if not any(
             kept["type"] == level["type"]
             and kept["price"] > 0
@@ -252,12 +255,16 @@ def _detect_htf_structure(df: pd.DataFrame, window: int = HTF_STRUCTURE_WINDOW) 
 
 
 def _fetch_htf_confluence(client, pair: str):
-    """Один запрос HTF_TIMEFRAME → (trend, ema, sr_levels, structure, htf_rsi, htf_below_ema)."""
+    """
+    Один запрос HTF_TIMEFRAME + дополнительный запрос 1d для макро-тренда.
+    Возвращает (trend, ema, sr_levels, structure, htf_rsi, htf_below_ema, macro_trend).
+    """
+    _default = (None, None, [], "RANGE", None, None, None)
     try:
         needed = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
         raw = client.fetch_ohlcv(pair, HTF_TIMEFRAME, limit=needed)
         if not raw or len(raw) < HTF_EMA_PERIOD:
-            return None, None, [], "RANGE", None, None
+            return _default
         df_htf = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df_htf["timestamp"] = pd.to_datetime(df_htf["timestamp"], unit="ms")
         closes    = df_htf["close"].astype(float)
@@ -271,10 +278,27 @@ def _fetch_htf_confluence(client, pair: str):
         htf_sr: List[Dict] = []
         if HTF_SR_CANDLES > 0 and len(df_htf) >= EXTREMA_WINDOW * 2 + 1:
             htf_sr = find_support_resistance(df_htf)
-        return trend, round(ema, 8), htf_sr, structure, htf_rsi, htf_below_ema
+
+        # Macro trend: fetch daily candles and compute EMA200
+        macro_trend: Optional[str] = None
+        if MACRO_TREND_FILTER:
+            try:
+                raw_d = client.fetch_ohlcv(pair, "1d", limit=MACRO_EMA_PERIOD)
+                if raw_d and len(raw_d) >= MACRO_EMA_PERIOD:
+                    daily_closes = pd.Series(
+                        [c[4] for c in raw_d],
+                        index=pd.to_datetime([c[0] for c in raw_d], unit="ms", utc=True),
+                        dtype=float,
+                    )
+                    ema_d = daily_closes.ewm(span=MACRO_EMA_PERIOD, adjust=False).mean()
+                    macro_trend = "UP" if float(daily_closes.iloc[-1]) > float(ema_d.iloc[-1]) else "DOWN"
+            except Exception:
+                pass
+
+        return trend, round(ema, 8), htf_sr, structure, htf_rsi, htf_below_ema, macro_trend
     except Exception as exc:
         logger.warning("Ошибка HTF анализа %s: %s", pair, exc)
-        return None, None, [], "RANGE", None, None
+        return _default
 
 
 def _mark_htf_confirmed(
@@ -331,7 +355,7 @@ def _detect_rsi_divergence(
     window: int = EXTREMA_WINDOW,
     proximity_pct: float = TOLERANCE_PERCENT,
 ) -> bool:
-    if not level_price:
+    if level_price is None or level_price <= 0:
         return False
     tol    = proximity_pct / 100.0 * 4
     n      = len(rsi_series)
@@ -486,6 +510,7 @@ def find_entry_signals(
     atr_ratio: float = 1.0,
     adx_series: Optional[pd.Series] = None,
     htf_below_ema: Optional[int] = None,
+    macro_trend: Optional[str] = None,
 ) -> List[Dict]:
     if regime in ("CRASH", "PUMP"):
         return []
@@ -561,6 +586,15 @@ def find_entry_signals(
                 continue
 
         entry = lvl["price"]
+
+        # Macro trend filter: trade only in the direction of the daily EMA200
+        # Blocks longs during macro downtrend and shorts during macro uptrend.
+        # RECOVERY/CORRECTION regimes bypass this to allow extreme-bounce entries.
+        if MACRO_TREND_FILTER and not special and macro_trend is not None:
+            if direction == "LONG"  and macro_trend == "DOWN":
+                continue
+            if direction == "SHORT" and macro_trend == "UP":
+                continue
 
         if not special and direction == "LONG" and LONG_MIN_CONFLUENCE > 0:
             if lvl.get("confluence_score", 0) < LONG_MIN_CONFLUENCE:

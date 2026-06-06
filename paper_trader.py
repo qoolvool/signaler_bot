@@ -321,9 +321,9 @@ class PaperPortfolio:
         unrealized = 0.0
         for trade in self.open_trades:
             cur = p.get(trade["pair"])
-            if cur is None:
+            if not cur:
                 continue
-            notional = trade.get("notional", trade["size_usd"])
+            notional = trade.get("notional", trade["size_usd"] * trade.get("leverage", self.leverage))
             if trade["direction"] == "LONG":
                 upnl = (cur - trade["entry_price"]) / trade["entry_price"] * notional
             else:
@@ -375,6 +375,12 @@ class PaperPortfolio:
             return None
         if self.max_open_trades > 0 and len(self.open_trades) + len(self.pending_orders) >= self.max_open_trades:
             logger.info("Лимит позиций (%d) достигнут.", self.max_open_trades)
+            return None
+        if direction == "LONG" and tp <= entry_price:
+            logger.warning("LONG TP %.8f <= entry %.8f (%s) — пропускаем", tp, entry_price, pair)
+            return None
+        if direction == "SHORT" and tp >= entry_price:
+            logger.warning("SHORT TP %.8f >= entry %.8f (%s) — пропускаем", tp, entry_price, pair)
             return None
 
         sl_pct = abs(entry_price - sl) / entry_price

@@ -15,7 +15,7 @@ MEXC_SECRET_KEY    = os.getenv("MEXC_SECRET_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
-TRADING_PAIRS = [
+TRADING_PAIRS = list(dict.fromkeys(
     p.strip() for p in os.getenv("TRADING_PAIRS", (
         # 13 пар — убраны BNB (exchange token, не уважает уровни) и RNDR (стабильно убыточен)
         "BTC/USDT,"   # цифровое золото / benchmark
@@ -33,7 +33,7 @@ TRADING_PAIRS = [
         "AVAX/USDT"   # high-perf L1 / subnets
     )).split(",")
     if p.strip()
-]
+))
 
 TIMEFRAME             = os.getenv("TIMEFRAME", "1h")
 CHECK_TIMEFRAME       = os.getenv("CHECK_TIMEFRAME", "5m")
@@ -61,6 +61,11 @@ HTF_TIMEFRAME  = os.getenv("HTF_TIMEFRAME", "4h")
 HTF_EMA_PERIOD = int(os.getenv("HTF_EMA_PERIOD", "50"))
 ADX_PERIOD     = int(os.getenv("ADX_PERIOD", "14"))
 ADX_MIN        = float(os.getenv("ADX_MIN", "20"))
+
+# Macro trend filter: daily EMA200. Blocks longs in macro downtrend and shorts in macro uptrend.
+# Computed by resampling already-downloaded 4h data to daily — no extra API call.
+MACRO_EMA_PERIOD   = int(os.getenv("MACRO_EMA_PERIOD", "200"))
+MACRO_TREND_FILTER = os.getenv("MACRO_TREND_FILTER", "true").lower() == "true"
 
 RSI_PERIOD            = int(os.getenv("RSI_PERIOD", "14"))
 RSI_OVERSOLD          = float(os.getenv("RSI_OVERSOLD", "30"))
