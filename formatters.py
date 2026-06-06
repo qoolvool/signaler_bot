@@ -158,7 +158,7 @@ def fmt_analysis(
     for lvl in levels:
         emoji    = "🔴" if lvl["type"] == "RESISTANCE" else "🟢"
         ru_type  = "Сопр." if lvl["type"] == "RESISTANCE" else "Подд."
-        dist     = (lvl["price"] - current_price) / current_price * 100
+        dist     = (lvl["price"] - current_price) / current_price * 100 if current_price else 0.0
         sign     = "+" if dist >= 0 else ""
         retest   = " ✅" if lvl.get("has_retest") else ""
         htf_mark = " ✨" if lvl.get("htf_confirmed") else ""
@@ -273,7 +273,7 @@ def fmt_open_trades(ptf: PaperPortfolio, prices: Dict[str, float]) -> str:
     for t in open_t:
         de  = "📈" if t["direction"] == "LONG" else "📉"
         cur = prices.get(t["pair"])
-        if cur:
+        if cur and t["entry_price"] and t["size_usd"]:
             ntl   = t.get("notional", t["size_usd"])
             upnl  = ((cur - t["entry_price"]) / t["entry_price"] * ntl
                      if t["direction"] == "LONG"

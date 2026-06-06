@@ -100,6 +100,7 @@ def remove_duplicates(levels: List[Dict], tolerance: float) -> List[Dict]:
     for level in sorted(levels, key=lambda x: x["touches"], reverse=True):
         if not any(
             kept["type"] == level["type"]
+            and kept["price"] > 0
             and abs(level["price"] - kept["price"]) / kept["price"] < tolerance
             for kept in unique
         ):
@@ -174,7 +175,7 @@ def _add_confluence_scores(
         tags: List[str] = []
         p = lvl["price"]
         for ema in ema_lvls:
-            if ema["type"] == lvl["type"] and abs(ema["price"] - p) / p <= tol:
+            if ema["type"] == lvl["type"] and p > 0 and abs(ema["price"] - p) / p <= tol:
                 tags.append(ema["subtype"])
         for fvg in fvg_zones:
             if fvg["type"] == lvl["type"] and fvg["bottom"] <= p <= fvg["top"]:
@@ -330,6 +331,8 @@ def _detect_rsi_divergence(
     window: int = EXTREMA_WINDOW,
     proximity_pct: float = TOLERANCE_PERCENT,
 ) -> bool:
+    if not level_price:
+        return False
     tol    = proximity_pct / 100.0 * 4
     n      = len(rsi_series)
     long   = direction == "LONG"
@@ -532,6 +535,8 @@ def find_entry_signals(
 
     signals = []
     for lvl in levels:
+        if not lvl["price"]:
+            continue
         distance = abs(current_price - lvl["price"]) / lvl["price"]
         if distance > proximity:
             continue

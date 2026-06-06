@@ -206,6 +206,9 @@ async def send_msg(bot: Bot, text: str) -> bool:
     except TelegramError as exc:
         logger.error("Ошибка Telegram: %s", exc)
         return False
+    except Exception as exc:
+        logger.error("Непредвиденная ошибка при отправке сообщения: %s", exc)
+        return False
 
 
 async def _run_position_checks(

@@ -183,15 +183,23 @@ def _download_pair(
     return df
 
 
-def phase1_download(pairs: List[str], years: int = 4, force: bool = False) -> None:
-    since_ms  = int(
-        (datetime.now(timezone.utc) - timedelta(days=years * 365 + 7)).timestamp() * 1000
-    )
+def phase1_download(
+    pairs: List[str],
+    years: int = 4,
+    force: bool = False,
+    since_dt: Optional[datetime] = None,
+) -> None:
+    if since_dt is not None:
+        since_ms = int(since_dt.timestamp() * 1000)
+    else:
+        since_ms = int(
+            (datetime.now(timezone.utc) - timedelta(days=years * 365 + 7)).timestamp() * 1000
+        )
     since_str = datetime.fromtimestamp(since_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
     client    = _binance()
 
-    logger.info("=== PHASE 1: Downloading %dy history for %d pairs (since %s) ===",
-                years, len(pairs), since_str)
+    logger.info("=== PHASE 1: Downloading history for %d pairs (since %s) ===",
+                len(pairs), since_str)
 
     for pair in pairs:
         for tf in ("1h", "4h"):
@@ -379,12 +387,15 @@ def phase2_simulate(
     pairs: List[str],
     analysis_interval_h: int = 4,
     workers: int = 0,
+    start_dt: Optional[datetime] = None,
+    end_dt: Optional[datetime] = None,
 ) -> Tuple[BacktestPortfolio, List[Dict]]:
     """
     Walk-forward simulation.
     Returns (portfolio, equity_log).
     workers=0 → auto (min(pairs, cpu_count)); workers=1 → single-process.
     """
+    _returns_cache.clear()  # ensure no stale correlation data from prior runs
     # ── Load cached data ──────────────────────────────────────
     logger.info("=== PHASE 2: Loading data ===")
     data_1h: Dict[str, pd.DataFrame] = {}
@@ -409,6 +420,15 @@ def phase2_simulate(
 
     # ── Build unified 1h timeline ─────────────────────────────
     all_ts = sorted(set().union(*[set(data_1h[p].index) for p in active]))
+    if start_dt is not None:
+        start_ts = pd.Timestamp(start_dt).tz_localize("UTC") if start_dt.tzinfo is None else pd.Timestamp(start_dt)
+        all_ts = [ts for ts in all_ts if ts >= start_ts]
+    if end_dt is not None:
+        end_ts = pd.Timestamp(end_dt).tz_localize("UTC") if end_dt.tzinfo is None else pd.Timestamp(end_dt)
+        all_ts = [ts for ts in all_ts if ts <= end_ts]
+    if not all_ts:
+        logger.error("No candles in the requested date range.")
+        sys.exit(1)
     logger.info("Timeline: %d hourly steps  %s → %s\n",
                 len(all_ts), all_ts[0].date(), all_ts[-1].date())
 
@@ -568,12 +588,28 @@ def _compute_stats(pf: BacktestPortfolio, equity_log: List[Dict]) -> Dict:
             d["losses"] += 1
         d["pnl"] += t.get("pnl_usd") or 0
 
-    # Monthly PnL
+    # Monthly PnL (absolute USD, by trade close date)
     monthly: Dict[str, float] = {}
     for t in closed:
         ts = (t.get("closed_at") or "")[:7]
         if ts:
             monthly[ts] = monthly.get(ts, 0.0) + (t.get("pnl_usd") or 0)
+
+    # Monthly return % via compound interest — (end_equity / start_equity - 1) × 100
+    # Uses equity_log so it reflects mark-to-market, not just closed trades.
+    monthly_ret_pct: Dict[str, float] = {}
+    if equity_log:
+        month_eq: Dict[str, Tuple[float, float]] = {}  # month -> (first_eq, last_eq)
+        for e in equity_log:
+            m  = e["timestamp"][:7]
+            eq = float(e["equity"])
+            if m not in month_eq:
+                month_eq[m] = (eq, eq)
+            else:
+                month_eq[m] = (month_eq[m][0], eq)
+        for m, (first_eq, last_eq) in month_eq.items():
+            if first_eq > 0:
+                monthly_ret_pct[m] = round((last_eq / first_eq - 1) * 100, 2)
 
     # Equity curve metrics
     eq = np.array([e["equity"] for e in equity_log]) if equity_log else np.array([INITIAL_BALANCE])
@@ -639,7 +675,8 @@ def _compute_stats(pf: BacktestPortfolio, equity_log: List[Dict]) -> Dict:
             "cancelled": pf.orders_cancelled,
             "triggered": len(pf.trades),
         },
-        "monthly_pnl": {k: round(v, 2) for k, v in sorted(monthly.items())},
+        "monthly_pnl":        {k: round(v, 2) for k, v in sorted(monthly.items())},
+        "monthly_return_pct": {k: v for k, v in sorted(monthly_ret_pct.items())},
         "per_pair": {
             pair: {
                 "trades":   d["trades"],
@@ -815,9 +852,12 @@ def _generate_html(
         card("Orders Created", str(or_["created"])),
     ])
 
+    monthly_ret = s.get("monthly_return_pct", {})
     monthly_rows = "".join(
         f"<tr><td>{m}</td>"
-        f"<td style='background:{'#c8f7c5' if v >= 0 else '#ffc9c9'};text-align:right'>${v:+.2f}</td></tr>"
+        f"<td style='background:{'#c8f7c5' if v >= 0 else '#ffc9c9'};text-align:right'>${v:+.2f}</td>"
+        f"<td style='background:{'#c8f7c5' if monthly_ret.get(m,0) >= 0 else '#ffc9c9'};text-align:right'>{monthly_ret.get(m,0):+.2f}%</td>"
+        f"</tr>"
         for m, v in sorted(s.get("monthly_pnl", {}).items())
     )
 
@@ -877,7 +917,7 @@ def _generate_html(
 <div class="charts">{img_html}</div>
 
 <h2>Monthly PnL</h2>
-<table><tr><th>Month</th><th>PnL USD</th></tr>{monthly_rows}</table>
+<table><tr><th>Month</th><th>PnL USD</th><th>Return % (compound)</th></tr>{monthly_rows}</table>
 
 <h2>Per-Pair Statistics</h2>
 <table>
@@ -950,6 +990,22 @@ def phase3_report(pf: BacktestPortfolio, equity_log: List[Dict]) -> None:
     print(f"  Orders:        {stats['orders']['created']} created / "
           f"{stats['orders']['cancelled']} cancelled")
     print("=" * 58)
+
+    monthly_pnl = stats.get("monthly_pnl", {})
+    monthly_ret = stats.get("monthly_return_pct", {})
+    if monthly_pnl:
+        print()
+        print("  MONTHLY PERFORMANCE  (compound interest)")
+        print(f"  {'Month':<9}  {'PnL USD':>10}  {'Return':>8}  {'Bar':}")
+        print("  " + "-" * 52)
+        for m in sorted(monthly_pnl.keys()):
+            usd = monthly_pnl[m]
+            ret = monthly_ret.get(m, 0.0)
+            bar_len = min(20, max(0, int(abs(ret) * 2)))
+            bar = ("+" if ret >= 0 else "-") * bar_len
+            print(f"  {m}  {usd:>+10.2f}  {ret:>+7.2f}%  {bar}")
+        print()
+
     print(f"\n  Results saved to: {RESULTS_DIR.resolve()}")
     print()
 
@@ -972,13 +1028,17 @@ def main() -> None:
                     help="Skip download, use cached CSV files")
     ap.add_argument("--force-download", action="store_true",
                     help="Re-download all data even if cached")
-    ap.add_argument("--years",    type=int, default=4,
-                    help="Years of history to use (default: 4)")
-    ap.add_argument("--interval", type=int, default=4,
+    ap.add_argument("--years",      type=int, default=4,
+                    help="Years of history to download if --start-date not set (default: 4)")
+    ap.add_argument("--start-date", type=str, default="2020-01-01",
+                    help="Simulation start date YYYY-MM-DD (default: 2020-01-01)")
+    ap.add_argument("--end-date",   type=str, default="2024-12-31",
+                    help="Simulation end date YYYY-MM-DD (default: 2024-12-31)")
+    ap.add_argument("--interval",   type=int, default=4,
                     help="Analysis interval in hours (default: 4; use 1 for max fidelity)")
-    ap.add_argument("--pairs",    type=str, default=None,
+    ap.add_argument("--pairs",      type=str, default=None,
                     help="Comma-separated pairs, e.g. BTC/USDT,ETH/USDT")
-    ap.add_argument("--workers",  type=int, default=0,
+    ap.add_argument("--workers",    type=int, default=0,
                     help="Parallel workers for analysis (default: 0 = auto; 1 = single-process)")
     args = ap.parse_args()
 
@@ -988,15 +1048,23 @@ def main() -> None:
         else TRADING_PAIRS
     )
 
+    start_dt = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt   = datetime.strptime(args.end_date,   "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
     if not args.skip_download:
-        phase1_download(pairs, years=args.years, force=args.force_download)
+        phase1_download(pairs, years=args.years, force=args.force_download, since_dt=start_dt)
 
     if args.download_only:
         logger.info("--download-only: done.")
         return
 
-    pf, equity_log = phase2_simulate(pairs, analysis_interval_h=args.interval,
-                                     workers=args.workers)
+    pf, equity_log = phase2_simulate(
+        pairs,
+        analysis_interval_h=args.interval,
+        workers=args.workers,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
     phase3_report(pf, equity_log)
 
 
