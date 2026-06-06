@@ -25,8 +25,12 @@ from config import (
     STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
     QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
     MACRO_TREND_FILTER,
+    EFFICIENCY_FILTER, EFFICIENCY_PERIOD, EFFICIENCY_MIN,
 )
-from indicators import _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series
+from indicators import (
+    _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series,
+    _calc_efficiency_ratio,
+)
 
 logger = logging.getLogger("signaler")
 
@@ -542,6 +546,13 @@ def find_entry_signals(
     special    = recovery or correction
 
     if not special:
+        # Efficiency Ratio gate: pullback entries only pay off in a real trend.
+        # Low ER ⇒ choppy/flat market where S/R levels are noise (the failure regime).
+        if EFFICIENCY_FILTER and EFFICIENCY_MIN > 0:
+            er = _calc_efficiency_ratio(df["close"], EFFICIENCY_PERIOD)
+            if er < EFFICIENCY_MIN:
+                logger.info("ER %.2f < %.2f — флэт, откатные сигналы пропущены", er, EFFICIENCY_MIN)
+                return []
         # ATR choppy filter: reject if current volatility is far below its average
         if CHOPPY_ATR_MIN > 0 and atr_ratio < CHOPPY_ATR_MIN:
             logger.info("ATR ratio %.2f < %.2f — слишком тихо, сигналы пропущены", atr_ratio, CHOPPY_ATR_MIN)

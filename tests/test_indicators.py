@@ -28,6 +28,42 @@ class TestCalcEma:
         assert len(ind._calc_ema(s, 10)) == 30
 
 
+# ── _calc_efficiency_ratio ──────────────────────────────────────────────────────
+
+class TestEfficiencyRatio:
+    def test_clean_uptrend_near_one(self):
+        """Monotonic rise: net change == path sum, so ER ≈ 1.0."""
+        s = pd.Series([float(x) for x in range(1, 30)])
+        assert ind._calc_efficiency_ratio(s, 20) == pytest.approx(1.0, abs=1e-6)
+
+    def test_clean_downtrend_near_one(self):
+        s = pd.Series([float(x) for x in range(30, 1, -1)])
+        assert ind._calc_efficiency_ratio(s, 20) == pytest.approx(1.0, abs=1e-6)
+
+    def test_pure_chop_near_zero(self):
+        """Oscillating ±1 returns to start: net change 0 → ER 0."""
+        s = pd.Series([100.0 + (1.0 if i % 2 else -1.0) for i in range(30)])
+        assert ind._calc_efficiency_ratio(s, 20) < 0.1
+
+    def test_trend_higher_than_chop(self):
+        trend = pd.Series([float(x) for x in range(30)])
+        chop  = pd.Series([100.0 + (1.0 if i % 2 else -1.0) for i in range(30)])
+        assert ind._calc_efficiency_ratio(trend, 20) > ind._calc_efficiency_ratio(chop, 20)
+
+    def test_insufficient_data_returns_zero(self):
+        s = pd.Series([1.0, 2.0, 3.0])
+        assert ind._calc_efficiency_ratio(s, 20) == 0.0
+
+    def test_flat_series_returns_zero(self):
+        s = pd.Series([100.0] * 30)
+        assert ind._calc_efficiency_ratio(s, 20) == 0.0
+
+    def test_bounded_zero_to_one(self):
+        s = sine_df(60)["close"]
+        er = ind._calc_efficiency_ratio(s, 20)
+        assert 0.0 <= er <= 1.0
+
+
 # ── _calc_atr ──────────────────────────────────────────────────────────────────
 
 class TestCalcAtr:
