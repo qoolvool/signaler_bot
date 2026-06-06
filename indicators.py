@@ -86,6 +86,20 @@ def _calc_atr_ratio(df: pd.DataFrame, atr_period: int = 14, avg_period: int = 20
     return round(current / hist_avg, 2) if hist_avg > 0 else 1.0
 
 
+def _calc_efficiency_ratio(close: pd.Series, period: int = 20) -> float:
+    """
+    Kaufman Efficiency Ratio over `period` bars: 0 = чистый флэт, 1 = чистый тренд.
+    ER = |чистое изменение| / Σ|пошаговых изменений|. Гейт для откатных входов:
+    откат по тренду окупается только когда цена реально движется направленно.
+    """
+    if len(close) < period + 1:
+        return 0.0
+    window = close.iloc[-(period + 1):]
+    net    = abs(float(window.iloc[-1]) - float(window.iloc[0]))
+    path   = float(window.diff().abs().sum())
+    return round(net / path, 4) if path > 0 else 0.0
+
+
 def _detect_regime(rsi_series: pd.Series, atr_ratio: float) -> str:
     """Возвращает 'CRASH'/'RECOVERY'/'PUMP'/'CORRECTION'/'NORMAL'."""
     curr_rsi = float(rsi_series.iloc[-1])

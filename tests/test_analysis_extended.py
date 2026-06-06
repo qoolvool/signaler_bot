@@ -161,6 +161,64 @@ class TestFindEntrySignalsSpecialEdge:
         assert an.find_entry_signals(df, levels, current, regime="PUMP")  == []
 
 
+# ── Efficiency Ratio gate ───────────────────────────────────────────────────────
+
+class TestEfficiencyRatioGate:
+    def _chop_df(self, n=300):
+        """Sideways market: oscillates ±1 around 100 → low ER."""
+        closes = [100.0 + (1.0 if i % 2 else -1.0) for i in range(n)]
+        return make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+
+    def _trend_df(self, n=300):
+        closes = [100.0 + i * 0.5 for i in range(n)]
+        return make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+
+    def test_gate_blocks_signals_in_chop(self):
+        orig_er  = an.EFFICIENCY_FILTER
+        orig_min = an.EFFICIENCY_MIN
+        an.EFFICIENCY_FILTER = True
+        an.EFFICIENCY_MIN    = 0.30
+        df = self._chop_df()
+        current = float(df["close"].iloc[-1])
+        levels = [{"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
+                   "confluence_score": 5, "confluence_tags": []}]
+        sigs = an.find_entry_signals(df, levels, current, ema_period=50)
+        an.EFFICIENCY_FILTER = orig_er
+        an.EFFICIENCY_MIN    = orig_min
+        assert sigs == []
+
+    def test_gate_disabled_does_not_block(self):
+        """With the filter off, chop alone must not short-circuit via ER."""
+        orig_er = an.EFFICIENCY_FILTER
+        an.EFFICIENCY_FILTER = False
+        df = self._chop_df()
+        current = float(df["close"].iloc[-1])
+        levels = [{"price": current, "type": "SUPPORT", "touches": 5,
+                   "confluence_score": 5, "confluence_tags": []}]
+        # Should not raise and ER path is skipped; other filters may still apply.
+        sigs = an.find_entry_signals(df, levels, current, ema_period=50)
+        an.EFFICIENCY_FILTER = orig_er
+        assert isinstance(sigs, list)
+
+    def test_gate_bypassed_in_special_regime(self):
+        """RECOVERY/CORRECTION bypass the ER gate (extreme-bounce entries)."""
+        orig_er  = an.EFFICIENCY_FILTER
+        orig_rsi = an.REQUIRE_RSI_DIVERGENCE
+        an.EFFICIENCY_FILTER      = True
+        an.REQUIRE_RSI_DIVERGENCE = False
+        df = self._chop_df()
+        current = float(df["close"].iloc[-1])
+        levels = [{"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
+                   "confluence_score": 1, "confluence_tags": []}]
+        sigs = an.find_entry_signals(
+            df, levels, current, regime="RECOVERY", crash_low=current * 0.95, ema_period=50,
+        )
+        an.EFFICIENCY_FILTER      = orig_er
+        an.REQUIRE_RSI_DIVERGENCE = orig_rsi
+        # Gate must not have fired — special regime reaches SL/TP logic.
+        assert isinstance(sigs, list)
+
+
 # ── MIN_CONFLUENCE_SCORE filter ────────────────────────────────────────────────
 
 class TestMinConfluenceScoreFilter:

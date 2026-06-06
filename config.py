@@ -88,6 +88,11 @@ COMMISSION_MAKER         = float(os.getenv("COMMISSION_MAKER", "0.0000"))
 COMMISSION_TAKER         = float(os.getenv("COMMISSION_TAKER", "0.0005"))
 CHOPPY_ADX_CONFIRM       = int(os.getenv("CHOPPY_ADX_CONFIRM", "4"))
 CHOPPY_ATR_MIN           = float(os.getenv("CHOPPY_ATR_MIN", "0.75"))
+# Efficiency Ratio (Kaufman): gate pullback entries on trend quality.
+# Blocks bounces when price is choppy/flat — the regime where S/R levels are noise.
+EFFICIENCY_FILTER        = os.getenv("EFFICIENCY_FILTER", "true").lower() == "true"
+EFFICIENCY_PERIOD        = int(os.getenv("EFFICIENCY_PERIOD", "20"))
+EFFICIENCY_MIN           = float(os.getenv("EFFICIENCY_MIN", "0.30"))
 RR_MAX                   = float(os.getenv("RR_MAX", "8.0"))
 MAX_SL_PERCENT           = float(os.getenv("MAX_SL_PERCENT", "3.5"))
 LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "3"))
