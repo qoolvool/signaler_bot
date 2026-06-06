@@ -73,3 +73,9 @@ logs/
 trades.json
 portfolio.json
 reports.json
+
+# ============================================================
+# Бэктест: кэш OHLCV и результаты / Backtest cache & results
+# ============================================================
+data/ohlcv/
+results/
