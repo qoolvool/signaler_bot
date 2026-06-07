@@ -62,10 +62,11 @@ HTF_EMA_PERIOD = int(os.getenv("HTF_EMA_PERIOD", "50"))
 ADX_PERIOD     = int(os.getenv("ADX_PERIOD", "14"))
 ADX_MIN        = float(os.getenv("ADX_MIN", "20"))
 
-# Macro trend filter: daily EMA200. Blocks longs in macro downtrend and shorts in macro uptrend.
+# Macro trend (daily EMA200): used as an input for adaptive SL sizing — not a
+# signal gate (ablation showed a hard macro gate is redundant with the Layer-1
+# HTF-structure check and yields zero PnL difference when removed).
 # Computed by resampling already-downloaded 4h data to daily — no extra API call.
 MACRO_EMA_PERIOD   = int(os.getenv("MACRO_EMA_PERIOD", "200"))
-MACRO_TREND_FILTER = os.getenv("MACRO_TREND_FILTER", "true").lower() == "true"
 
 RSI_PERIOD            = int(os.getenv("RSI_PERIOD", "14"))
 RSI_OVERSOLD          = float(os.getenv("RSI_OVERSOLD", "30"))
@@ -88,15 +89,13 @@ COMMISSION_MAKER         = float(os.getenv("COMMISSION_MAKER", "0.0000"))
 COMMISSION_TAKER         = float(os.getenv("COMMISSION_TAKER", "0.0005"))
 CHOPPY_ADX_CONFIRM       = int(os.getenv("CHOPPY_ADX_CONFIRM", "4"))
 CHOPPY_ATR_MIN           = float(os.getenv("CHOPPY_ATR_MIN", "0.75"))
-# Efficiency Ratio (Kaufman): mean-reversion bounces respect S/R levels in
-# ranging markets and get blown through in trends. Block entries when price is
-# trending too efficiently (ER above the cap). Validated on 2020-2024: ER<0.30
-# doubled return (+$347→+$723) and halved drawdown (-15.3%→-8.0%).
-EFFICIENCY_FILTER        = os.getenv("EFFICIENCY_FILTER", "true").lower() == "true"
-EFFICIENCY_PERIOD        = int(os.getenv("EFFICIENCY_PERIOD", "20"))
-EFFICIENCY_MAX           = float(os.getenv("EFFICIENCY_MAX", "0.30"))
 RR_MAX                   = float(os.getenv("RR_MAX", "8.0"))
 MAX_SL_PERCENT           = float(os.getenv("MAX_SL_PERCENT", "3.5"))
+# Adaptive SL: tighten the SL cap during a macro downtrend (daily close < EMA200).
+# Backtests show a tighter cap helps in bear regimes (+$67 in 2022) but hurts in
+# bull regimes (-$264 in 2023) — so the cap is widened/tightened by macro_trend.
+ADAPTIVE_SL              = os.getenv("ADAPTIVE_SL", "true").lower() == "true"
+MAX_SL_PERCENT_BEAR      = float(os.getenv("MAX_SL_PERCENT_BEAR", "2.0"))
 LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "3"))
 LONG_HTF_RSI_MIN         = float(os.getenv("LONG_HTF_RSI_MIN", "50.0"))
 HTF_BELOW_EMA_MAX        = int(os.getenv("HTF_BELOW_EMA_MAX", "2"))

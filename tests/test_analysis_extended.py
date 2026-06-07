@@ -10,16 +10,6 @@ from unittest.mock import MagicMock, patch
 import analysis as an
 
 
-@pytest.fixture(autouse=True)
-def _disable_efficiency_gate():
-    """Synthetic monotonic test data trips the ER trend gate; tests targeting
-    other filters opt out by default. Gate-specific tests re-enable it locally."""
-    orig = an.EFFICIENCY_FILTER
-    an.EFFICIENCY_FILTER = False
-    yield
-    an.EFFICIENCY_FILTER = orig
-
-
 # ── _detect_rsi_divergence (direct) ───────────────────────────────────────────
 
 class TestDetectRsiDivergence:
@@ -169,79 +159,6 @@ class TestFindEntrySignalsSpecialEdge:
                    "confluence_score": 1, "confluence_tags": []}]
         assert an.find_entry_signals(df, levels, current, regime="CRASH") == []
         assert an.find_entry_signals(df, levels, current, regime="PUMP")  == []
-
-
-# ── Efficiency Ratio gate ───────────────────────────────────────────────────────
-
-class TestEfficiencyRatioGate:
-    def _chop_df(self, n=300):
-        """Sideways market: oscillates ±1 around 100 → low ER."""
-        closes = [100.0 + (1.0 if i % 2 else -1.0) for i in range(n)]
-        return make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
-
-    def _trend_df(self, n=300):
-        closes = [100.0 + i * 0.5 for i in range(n)]
-        return make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
-
-    def test_gate_blocks_signals_in_trend(self):
-        """High ER (efficient trend) ⇒ S/R bounces get blown through ⇒ blocked."""
-        orig_er  = an.EFFICIENCY_FILTER
-        orig_max = an.EFFICIENCY_MAX
-        an.EFFICIENCY_FILTER = True
-        an.EFFICIENCY_MAX    = 0.30
-        df = self._trend_df()
-        current = float(df["close"].iloc[-1])
-        levels = [{"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
-                   "confluence_score": 5, "confluence_tags": []}]
-        sigs = an.find_entry_signals(df, levels, current, ema_period=50)
-        an.EFFICIENCY_FILTER = orig_er
-        an.EFFICIENCY_MAX    = orig_max
-        assert sigs == []
-
-    def test_gate_allows_ranging_market(self):
-        """Low ER (range) must not be short-circuited by the ER gate."""
-        orig_er  = an.EFFICIENCY_FILTER
-        orig_max = an.EFFICIENCY_MAX
-        an.EFFICIENCY_FILTER = True
-        an.EFFICIENCY_MAX    = 0.30
-        df = self._chop_df()  # ER ≈ 0, well below the cap
-        current = float(df["close"].iloc[-1])
-        levels = [{"price": current, "type": "SUPPORT", "touches": 5,
-                   "confluence_score": 5, "confluence_tags": []}]
-        sigs = an.find_entry_signals(df, levels, current, ema_period=50)
-        an.EFFICIENCY_FILTER = orig_er
-        an.EFFICIENCY_MAX    = orig_max
-        assert isinstance(sigs, list)  # other filters may still apply, ER did not block
-
-    def test_gate_disabled_does_not_block(self):
-        """With the filter off, a strong trend must not be blocked via ER."""
-        orig_er = an.EFFICIENCY_FILTER
-        an.EFFICIENCY_FILTER = False
-        df = self._trend_df()
-        current = float(df["close"].iloc[-1])
-        levels = [{"price": current, "type": "SUPPORT", "touches": 5,
-                   "confluence_score": 5, "confluence_tags": []}]
-        sigs = an.find_entry_signals(df, levels, current, ema_period=50)
-        an.EFFICIENCY_FILTER = orig_er
-        assert isinstance(sigs, list)
-
-    def test_gate_bypassed_in_special_regime(self):
-        """RECOVERY/CORRECTION bypass the ER gate (extreme-bounce entries)."""
-        orig_er  = an.EFFICIENCY_FILTER
-        orig_rsi = an.REQUIRE_RSI_DIVERGENCE
-        an.EFFICIENCY_FILTER      = True
-        an.REQUIRE_RSI_DIVERGENCE = False
-        df = self._trend_df()  # high ER — would be blocked in NORMAL regime
-        current = float(df["close"].iloc[-1])
-        levels = [{"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
-                   "confluence_score": 1, "confluence_tags": []}]
-        sigs = an.find_entry_signals(
-            df, levels, current, regime="RECOVERY", crash_low=current * 0.95, ema_period=50,
-        )
-        an.EFFICIENCY_FILTER      = orig_er
-        an.REQUIRE_RSI_DIVERGENCE = orig_rsi
-        # Gate must not have fired — special regime reaches SL/TP logic.
-        assert isinstance(sigs, list)
 
 
 # ── MIN_CONFLUENCE_SCORE filter ────────────────────────────────────────────────
@@ -466,3 +383,87 @@ class TestFetchHtfConfluenceReturn:
         client.fetch_ohlcv.side_effect = Exception("network error")
         result = an._fetch_htf_confluence(client, "BTC/USDT")
         assert result == (None, None, [], "RANGE", None, None, None)
+
+
+# ── _calc_quality_mult: RSI-divergence bonus ──────────────────────────────────
+
+class TestCalcQualityMultDivergenceBonus:
+    def setup_method(self):
+        self._orig = an.REQUIRE_RSI_DIVERGENCE
+
+    def teardown_method(self):
+        an.REQUIRE_RSI_DIVERGENCE = self._orig
+
+    def test_divergence_boosts_multiplier_when_required(self):
+        an.REQUIRE_RSI_DIVERGENCE = True
+        lvl = {"confluence_score": 2}
+        with_div    = an._calc_quality_mult(lvl, rr=2.0, htf_confirmed=False, divergence=True)
+        without_div = an._calc_quality_mult(lvl, rr=2.0, htf_confirmed=False, divergence=False)
+        assert with_div > without_div
+
+    def test_divergence_has_no_effect_when_not_required(self):
+        an.REQUIRE_RSI_DIVERGENCE = False
+        lvl = {"confluence_score": 2}
+        with_div    = an._calc_quality_mult(lvl, rr=2.0, htf_confirmed=False, divergence=True)
+        without_div = an._calc_quality_mult(lvl, rr=2.0, htf_confirmed=False, divergence=False)
+        assert with_div == without_div
+
+
+# ── Adaptive SL: cap follows macro trend ──────────────────────────────────────
+
+class TestAdaptiveSlCap:
+    """A SL width between MAX_SL_PERCENT_BEAR and MAX_SL_PERCENT should be
+    accepted in a macro uptrend but rejected in a macro downtrend."""
+
+    def _trending_df(self, n=60):
+        closes = [float(100 + i) for i in range(n)]
+        return make_df(closes, highs=[c + 2 for c in closes], lows=[c - 2 for c in closes])
+
+    def _signals(self, df, current, macro_trend):
+        levels = [
+            {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
+             "confluence_score": 3, "confluence_tags": ["EMA21", "FVG", "HTF_SR"]},
+            {"price": round(current + 10, 2), "type": "RESISTANCE", "touches": 3,
+             "confluence_score": 0, "confluence_tags": []},
+        ]
+        return an.find_entry_signals(
+            df, levels, current_price=current,
+            htf_structure="BULLISH", adx_val=30.0, adx_min=20.0,
+            ema_period=50, regime="NORMAL", htf_rsi=60.0, htf_below_ema=0,
+            sl_atr_mult=1.05, macro_trend=macro_trend,
+        )
+
+    def setup_method(self):
+        self._orig_adaptive = an.ADAPTIVE_SL
+        self._orig_max      = an.MAX_SL_PERCENT
+        self._orig_bear     = an.MAX_SL_PERCENT_BEAR
+        self._orig_struct   = an.STRUCTURAL_SL
+        an.ADAPTIVE_SL        = True
+        an.MAX_SL_PERCENT     = 3.5
+        an.MAX_SL_PERCENT_BEAR = 2.0
+        an.STRUCTURAL_SL      = False
+
+    def teardown_method(self):
+        an.ADAPTIVE_SL         = self._orig_adaptive
+        an.MAX_SL_PERCENT      = self._orig_max
+        an.MAX_SL_PERCENT_BEAR = self._orig_bear
+        an.STRUCTURAL_SL       = self._orig_struct
+
+    def test_wide_sl_rejected_in_macro_downtrend(self):
+        df = self._trending_df()
+        current = float(df["close"].iloc[-1])
+        sigs = self._signals(df, current, macro_trend="DOWN")
+        assert sigs == []
+
+    def test_same_sl_accepted_in_macro_uptrend(self):
+        df = self._trending_df()
+        current = float(df["close"].iloc[-1])
+        sigs = self._signals(df, current, macro_trend="UP")
+        assert any(s["direction"] == "LONG" for s in sigs)
+
+    def test_adaptive_sl_disabled_uses_default_cap_regardless_of_trend(self):
+        an.ADAPTIVE_SL = False
+        df = self._trending_df()
+        current = float(df["close"].iloc[-1])
+        sigs = self._signals(df, current, macro_trend="DOWN")
+        assert any(s["direction"] == "LONG" for s in sigs)

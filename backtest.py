@@ -50,7 +50,7 @@ except ImportError:
 
 # ── Bot modules ──────────────────────────────────────────────────────────────
 from config import (
-    TRADING_PAIRS, CANDLES_LIMIT, TOLERANCE_PERCENT, MACRO_EMA_PERIOD, MACRO_TREND_FILTER,
+    TRADING_PAIRS, CANDLES_LIMIT, TOLERANCE_PERCENT, MACRO_EMA_PERIOD,
     EXTREMA_WINDOW, TOP_N_LEVELS, MIN_TOUCHES, HTF_STRUCTURE_WINDOW,
     ENTRY_PROXIMITY_PERCENT, EMA_PERIOD,
     ATR_PERIOD, SL_ATR_MULT, TP_ATR_MIN_MULT, MIN_RR,
@@ -492,13 +492,13 @@ def phase2_simulate(
     HTF_TAIL = max(HTF_SR_CANDLES, HTF_EMA_PERIOD + 30)
 
     # ── Precompute macro trend (daily EMA200 from 4h data) ────
+    # Used as an input for adaptive SL sizing in find_entry_signals.
     macro_trend_map: Dict[str, Dict[pd.Timestamp, str]] = {}
-    if MACRO_TREND_FILTER:
-        for p in active:
-            if data_4h.get(p) is not None:
-                macro_trend_map[p] = _precompute_macro_trends(data_4h[p])
-        logger.info("Macro trend maps built for %d pairs (daily EMA%d)",
-                    len(macro_trend_map), MACRO_EMA_PERIOD)
+    for p in active:
+        if data_4h.get(p) is not None:
+            macro_trend_map[p] = _precompute_macro_trends(data_4h[p])
+    logger.info("Macro trend maps built for %d pairs (daily EMA%d)",
+                len(macro_trend_map), MACRO_EMA_PERIOD)
 
     # ── Portfolio ──────────────────────────────────────────────
     pf = BacktestPortfolio(
