@@ -24,7 +24,7 @@ from config import (
     MAX_SL_PERCENT, LONG_MIN_CONFLUENCE, LONG_HTF_RSI_MIN, HTF_BELOW_EMA_MAX,
     STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
     QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
-    MACRO_TREND_FILTER,
+    ADAPTIVE_SL, MAX_SL_PERCENT_BEAR, MACRO_EMA_PERIOD,
 )
 from indicators import (
     _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series,
@@ -281,21 +281,20 @@ def _fetch_htf_confluence(client, pair: str):
         if HTF_SR_CANDLES > 0 and len(df_htf) >= EXTREMA_WINDOW * 2 + 1:
             htf_sr = find_support_resistance(df_htf)
 
-        # Macro trend: fetch daily candles and compute EMA200
+        # Macro trend (daily EMA200) — used as an input for adaptive SL sizing.
         macro_trend: Optional[str] = None
-        if MACRO_TREND_FILTER:
-            try:
-                raw_d = client.fetch_ohlcv(pair, "1d", limit=MACRO_EMA_PERIOD)
-                if raw_d and len(raw_d) >= MACRO_EMA_PERIOD:
-                    daily_closes = pd.Series(
-                        [c[4] for c in raw_d],
-                        index=pd.to_datetime([c[0] for c in raw_d], unit="ms", utc=True),
-                        dtype=float,
-                    )
-                    ema_d = daily_closes.ewm(span=MACRO_EMA_PERIOD, adjust=False).mean()
-                    macro_trend = "UP" if float(daily_closes.iloc[-1]) > float(ema_d.iloc[-1]) else "DOWN"
-            except Exception:
-                pass
+        try:
+            raw_d = client.fetch_ohlcv(pair, "1d", limit=MACRO_EMA_PERIOD)
+            if raw_d and len(raw_d) >= MACRO_EMA_PERIOD:
+                daily_closes = pd.Series(
+                    [c[4] for c in raw_d],
+                    index=pd.to_datetime([c[0] for c in raw_d], unit="ms", utc=True),
+                    dtype=float,
+                )
+                ema_d = daily_closes.ewm(span=MACRO_EMA_PERIOD, adjust=False).mean()
+                macro_trend = "UP" if float(daily_closes.iloc[-1]) > float(ema_d.iloc[-1]) else "DOWN"
+        except Exception:
+            pass
 
         return trend, round(ema, 8), htf_sr, structure, htf_rsi, htf_below_ema, macro_trend
     except Exception as exc:
@@ -404,7 +403,7 @@ def _find_structural_sl(
         return min(candidates) * (1.0 + STRUCTURAL_SL_BUFFER / 100.0)
 
 
-def _calc_quality_mult(lvl: Dict, rr: float, htf_confirmed: bool) -> float:
+def _calc_quality_mult(lvl: Dict, rr: float, htf_confirmed: bool, divergence: bool = False) -> float:
     """Множитель размера позиции по качеству сигнала [QUALITY_MULT_MIN, QUALITY_MULT_MAX]."""
     score = lvl.get("confluence_score", 0)
     if score == 0:
@@ -422,6 +421,8 @@ def _calc_quality_mult(lvl: Dict, rr: float, htf_confirmed: bool) -> float:
             mult *= 1.1
     if htf_confirmed:
         mult *= 1.1
+    if REQUIRE_RSI_DIVERGENCE and divergence:
+        mult *= 1.05
     return round(min(max(mult, QUALITY_MULT_MIN), QUALITY_MULT_MAX), 2)
 
 
@@ -457,13 +458,16 @@ def _check_correlation(pair: str, open_pairs: List[str]) -> bool:
 def _layer1_passes(
     direction: str,
     htf_structure: Optional[str],
-    divergence: bool,
     special: bool,
 ) -> bool:
-    """HTF-structure gate + RSI-divergence requirement (Layer 1).
+    """HTF-structure gate (Layer 1).
 
     None is treated the same as "RANGE" — no signals when 4h data is
     unavailable; trading without HTF confirmation is not allowed.
+
+    RSI-divergence is no longer a hard requirement here — it is rewarded as a
+    position-sizing bonus in `_calc_quality_mult` instead (a hard gate measurably
+    hurt PnL in both bull and bear backtests without changing trade direction).
     """
     if not special:
         if htf_structure is None or htf_structure == "RANGE":
@@ -471,8 +475,6 @@ def _layer1_passes(
         if htf_structure == "BULLISH" and direction != "LONG":
             return False
         if htf_structure == "BEARISH" and direction != "SHORT":
-            return False
-        if REQUIRE_RSI_DIVERGENCE and not divergence:
             return False
     return True
 
@@ -589,15 +591,6 @@ def find_entry_signals(
 
         entry = lvl["price"]
 
-        # Macro trend filter: trade only in the direction of the daily EMA200
-        # Blocks longs during macro downtrend and shorts during macro uptrend.
-        # RECOVERY/CORRECTION regimes bypass this to allow extreme-bounce entries.
-        if MACRO_TREND_FILTER and not special and macro_trend is not None:
-            if direction == "LONG"  and macro_trend == "DOWN":
-                continue
-            if direction == "SHORT" and macro_trend == "UP":
-                continue
-
         if not special and direction == "LONG" and LONG_MIN_CONFLUENCE > 0:
             if lvl.get("confluence_score", 0) < LONG_MIN_CONFLUENCE:
                 logger.debug("LONG пропущен: confluence=%d < LONG_MIN_CONFLUENCE=%d",
@@ -623,7 +616,7 @@ def find_entry_signals(
             _detect_rsi_divergence(df, rsi_series, direction, entry)
             if rsi_series is not None else False
         )
-        if not _layer1_passes(direction, htf_structure, divergence, special):
+        if not _layer1_passes(direction, htf_structure, special):
             continue
 
         pattern_confirmed = pattern in (_BULLISH_PATTERNS if direction == "LONG" else _BEARISH_PATTERNS)
@@ -698,9 +691,15 @@ def find_entry_signals(
                 else:
                     tp = entry - tp_min
 
-        # Reject trades where SL is too wide regardless of regime
-        if MAX_SL_PERCENT > 0 and sl_dist > 0:
-            if sl_dist / entry * 100 > MAX_SL_PERCENT:
+        # Reject trades where SL is too wide regardless of regime.
+        # Adaptive cap: tighten the limit during a macro downtrend (daily close
+        # below EMA200) — backtests show a tighter cap helps in bear regimes but
+        # costs PnL in bull regimes, so the cap follows the macro trend.
+        max_sl_percent = MAX_SL_PERCENT
+        if ADAPTIVE_SL and macro_trend == "DOWN":
+            max_sl_percent = MAX_SL_PERCENT_BEAR
+        if max_sl_percent > 0 and sl_dist > 0:
+            if sl_dist / entry * 100 > max_sl_percent:
                 continue
 
         # Cap TP at RR_MAX to avoid unreachable targets (e.g. RR=31, 74)
@@ -718,7 +717,7 @@ def find_entry_signals(
         risk_pct    = round(sl_dist / entry * 100, 2)
         reward_pct  = round(tp_dist / entry * 100, 2)
         quality_mult = (
-            _calc_quality_mult(lvl, rr, lvl.get("htf_confirmed", False))
+            _calc_quality_mult(lvl, rr, lvl.get("htf_confirmed", False), divergence)
             if QUALITY_SIZING else 1.0
         )
 

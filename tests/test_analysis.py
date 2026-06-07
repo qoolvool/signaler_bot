@@ -264,36 +264,23 @@ class TestDetectCandlePattern:
 # ── _layer1_passes / _layer3_passes ───────────────────────────────────────────
 
 class TestLayer1Passes:
-    def setup_method(self):
-        self._orig_rsi  = an.REQUIRE_RSI_DIVERGENCE
-        self._orig_htf  = None
-
-    def teardown_method(self):
-        an.REQUIRE_RSI_DIVERGENCE = self._orig_rsi
-
     def test_bullish_structure_long_passes(self):
-        assert an._layer1_passes("LONG", "BULLISH", True, False) is True
+        assert an._layer1_passes("LONG", "BULLISH", False) is True
 
     def test_bearish_structure_short_passes(self):
-        assert an._layer1_passes("SHORT", "BEARISH", True, False) is True
+        assert an._layer1_passes("SHORT", "BEARISH", False) is True
 
     def test_range_rejects_normal(self):
-        assert an._layer1_passes("LONG", "RANGE", True, False) is False
+        assert an._layer1_passes("LONG", "RANGE", False) is False
 
     def test_wrong_structure_rejects(self):
-        assert an._layer1_passes("LONG", "BEARISH", True, False) is False
-
-    def test_no_divergence_rejects_when_required(self):
-        an.REQUIRE_RSI_DIVERGENCE = True
-        assert an._layer1_passes("LONG", "BULLISH", False, False) is False
+        assert an._layer1_passes("LONG", "BEARISH", False) is False
 
     def test_special_bypasses_all(self):
-        an.REQUIRE_RSI_DIVERGENCE = True
-        assert an._layer1_passes("LONG", "RANGE", False, True) is True
+        assert an._layer1_passes("LONG", "RANGE", True) is True
 
     def test_none_structure_blocks_like_range(self):
-        an.REQUIRE_RSI_DIVERGENCE = False
-        assert an._layer1_passes("LONG", None, False, False) is False
+        assert an._layer1_passes("LONG", None, False) is False
 
 
 class TestLayer3Passes:
