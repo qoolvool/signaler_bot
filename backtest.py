@@ -1086,10 +1086,10 @@ def main() -> None:
                     help="Re-download all data even if cached")
     ap.add_argument("--years",      type=int, default=4,
                     help="Years of history to download if --start-date not set (default: 4)")
-    ap.add_argument("--start-date", type=str, default="2020-01-01",
-                    help="Simulation start date YYYY-MM-DD (default: 2020-01-01)")
-    ap.add_argument("--end-date",   type=str, default="2024-01-01",
-                    help="Simulation end date YYYY-MM-DD (default: 2024-01-01)")
+    ap.add_argument("--start-date", type=str, default="2022-06-01",
+                    help="Simulation start date YYYY-MM-DD (default: 2022-06-01)")
+    ap.add_argument("--end-date",   type=str, default="2026-06-01",
+                    help="Simulation end date YYYY-MM-DD (default: 2026-06-01)")
     ap.add_argument("--interval",   type=int, default=4,
                     help="Analysis interval in hours (default: 4; use 1 for max fidelity)")
     ap.add_argument("--pairs",      type=str, default=None,
