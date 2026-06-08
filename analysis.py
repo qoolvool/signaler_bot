@@ -11,7 +11,7 @@ import pandas as pd
 from config import (
     CORR_MAX, CORR_LOOKBACK,
     ENTRY_PROXIMITY_PERCENT, EMA_PERIOD, ATR_PERIOD,
-    SL_ATR_MULT, TP_ATR_MIN_MULT, MIN_RR, STRUCT_RR_MIN, ADX_MIN,
+    SL_ATR_MULT, TP_ATR_MIN_MULT, MIN_RR, STRUCT_RR_MIN, ADX_MIN, SHORT_ONLY,
     EXTREMA_WINDOW, TOLERANCE_PERCENT,
     MIN_TOUCHES, TOP_N_LEVELS, MIN_TOUCH_SPACING,
     LEVEL_AGE_MIN_CANDLES, VOLUME_TOUCH_MULTIPLIER, REQUIRE_RETEST,
@@ -591,6 +591,9 @@ def find_entry_signals(
                 continue
 
         entry = lvl["price"]
+
+        if SHORT_ONLY and direction == "LONG":
+            continue
 
         if not special and direction == "LONG" and LONG_MIN_CONFLUENCE > 0:
             if lvl.get("confluence_score", 0) < LONG_MIN_CONFLUENCE:

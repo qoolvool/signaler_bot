@@ -108,6 +108,11 @@ MAX_SL_PERCENT           = float(os.getenv("MAX_SL_PERCENT", "3.5"))
 ADAPTIVE_SL              = os.getenv("ADAPTIVE_SL", "true").lower() == "true"
 MAX_SL_PERCENT_BEAR      = float(os.getenv("MAX_SL_PERCENT_BEAR", "2.0"))
 LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "3"))
+# Disable LONG entries entirely. Over 2022-2024 LONGs produced essentially
+# zero net PnL (-$6.36 total) while concentrating losses in the worst months
+# (Oct-22 LONGs: -$26.20 of -$30.79 total; Oct-23 LONGs: -$13.55 of -$18.30).
+# The bot's edge is overwhelmingly in SHORTs (+$687.36 over same period).
+SHORT_ONLY               = os.getenv("SHORT_ONLY", "false").lower() == "true"
 LONG_HTF_RSI_MIN         = float(os.getenv("LONG_HTF_RSI_MIN", "50.0"))
 HTF_BELOW_EMA_MAX        = int(os.getenv("HTF_BELOW_EMA_MAX", "2"))
 BREAKEVEN_THRESHOLD      = float(os.getenv("BREAKEVEN_THRESHOLD", "0.5"))
