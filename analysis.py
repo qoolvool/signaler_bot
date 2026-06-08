@@ -11,7 +11,7 @@ import pandas as pd
 from config import (
     CORR_MAX, CORR_LOOKBACK,
     ENTRY_PROXIMITY_PERCENT, EMA_PERIOD, ATR_PERIOD,
-    SL_ATR_MULT, TP_ATR_MIN_MULT, MIN_RR, ADX_MIN,
+    SL_ATR_MULT, TP_ATR_MIN_MULT, MIN_RR, STRUCT_RR_MIN, ADX_MIN,
     EXTREMA_WINDOW, TOLERANCE_PERCENT,
     MIN_TOUCHES, TOP_N_LEVELS, MIN_TOUCH_SPACING,
     LEVEL_AGE_MIN_CANDLES, VOLUME_TOUCH_MULTIPLIER, REQUIRE_RETEST,
@@ -504,6 +504,7 @@ def find_entry_signals(
     sl_atr_mult: float = SL_ATR_MULT,
     tp_atr_min_mult: float = TP_ATR_MIN_MULT,
     min_rr: float = MIN_RR,
+    struct_rr_min: float = STRUCT_RR_MIN,
     adx_min: float = ADX_MIN,
     regime: str = "NORMAL",
     crash_low: Optional[float] = None,
@@ -670,7 +671,7 @@ def find_entry_signals(
                 if above:
                     nearest    = above[0]["price"]
                     nearest_rr = (nearest - entry) / sl_dist
-                    if nearest_rr >= min_rr:
+                    if nearest_rr >= struct_rr_min:
                         tp = nearest
                     else:
                         continue  # nearest S/R doesn't meet RR — skip
@@ -684,7 +685,7 @@ def find_entry_signals(
                 if below:
                     nearest    = below[0]["price"]
                     nearest_rr = (entry - nearest) / sl_dist
-                    if nearest_rr >= min_rr:
+                    if nearest_rr >= struct_rr_min:
                         tp = nearest
                     else:
                         continue  # nearest S/R doesn't meet RR — skip

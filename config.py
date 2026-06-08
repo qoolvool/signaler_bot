@@ -56,6 +56,17 @@ ATR_PERIOD              = int(os.getenv("ATR_PERIOD", "14"))
 SL_ATR_MULT             = float(os.getenv("SL_ATR_MULT", "2.0"))
 TP_ATR_MIN_MULT         = float(os.getenv("TP_ATR_MIN_MULT", "4.0"))
 MIN_RR                  = float(os.getenv("MIN_RR", "2.0"))
+# Separate, stricter rejection threshold for trades that target a real
+# structural S/R level (vs. the ATR-based fallback TP, which always uses
+# MIN_RR as its distance multiplier). Backtests show trades whose natural
+# structural RR sits right at the MIN_RR floor (~2.0) are net-losing on
+# average, while trades with structural RR well above it are far more
+# profitable AND have a higher win rate — the distance to the opposite
+# level acts as a proxy for setup quality. Raising just the rejection bar
+# (without touching the fallback TP distance — that backfired in the
+# MIN_RR=3.0 ablation by pushing fallback targets out of reach) filters
+# out exactly the weak setups without hurting the fallback trades' hit rate.
+STRUCT_RR_MIN           = float(os.getenv("STRUCT_RR_MIN", str(MIN_RR)))
 
 HTF_TIMEFRAME  = os.getenv("HTF_TIMEFRAME", "4h")
 HTF_EMA_PERIOD = int(os.getenv("HTF_EMA_PERIOD", "50"))
