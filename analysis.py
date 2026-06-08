@@ -597,11 +597,7 @@ def find_entry_signals(
         # Anti-trend guard: don't short into a strong, established uptrend
         # (high ADX with +DI dominant) — this is the exact setup that produced
         # the bot's worst drawdowns (e.g. shorting BTC's Oct-2023 +28% rally).
-        # Deliberately NOT gated by `not special`: the Oct-2023 losing shorts
-        # were fired while regime==CORRECTION (a pump cooling off but still in
-        # a strong uptrend by ADX/DI), so excluding "special" regimes here would
-        # skip exactly the case this guard exists to catch.
-        if (ANTI_TREND_GUARD and direction == "SHORT"
+        if (ANTI_TREND_GUARD and not special and direction == "SHORT"
                 and adx_val is not None and pdi_val is not None and ndi_val is not None
                 and adx_val >= ANTI_TREND_ADX_MIN and pdi_val > ndi_val):
             logger.debug("SHORT пропущен: сильный аптренд ADX=%.1f +DI=%.1f > -DI=%.1f",
