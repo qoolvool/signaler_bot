@@ -272,7 +272,7 @@ async def _compute_analysis(
     )
     if htf_sr:
         _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
-    adx_val, _, _ = _calc_adx(df, ADX_PERIOD)
+    adx_val, pdi_val, ndi_val = _calc_adx(df, ADX_PERIOD)
 
     rsi_series = _calc_rsi_series(df, RSI_PERIOD)
     rsi_raw    = float(rsi_series.iloc[-1])
@@ -310,6 +310,8 @@ async def _compute_analysis(
         atr_ratio=atr_ratio,
         htf_below_ema=htf_below_ema,
         macro_trend=macro_trend,
+        pdi_val=pdi_val,
+        ndi_val=ndi_val,
     )
     return _PairAnalysis(
         levels=levels, signals=signals,

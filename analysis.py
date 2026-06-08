@@ -25,6 +25,7 @@ from config import (
     STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
     QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
     ADAPTIVE_SL, MAX_SL_PERCENT_BEAR, MACRO_EMA_PERIOD,
+    ANTI_TREND_GUARD, ANTI_TREND_ADX_MIN,
 )
 from indicators import (
     _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series,
@@ -515,6 +516,8 @@ def find_entry_signals(
     adx_series: Optional[pd.Series] = None,
     htf_below_ema: Optional[int] = None,
     macro_trend: Optional[str] = None,
+    pdi_val: Optional[float] = None,
+    ndi_val: Optional[float] = None,
 ) -> List[Dict]:
     if regime in ("CRASH", "PUMP"):
         return []
@@ -590,6 +593,16 @@ def find_entry_signals(
                 continue
 
         entry = lvl["price"]
+
+        # Anti-trend guard: don't short into a strong, established uptrend
+        # (high ADX with +DI dominant) — this is the exact setup that produced
+        # the bot's worst drawdowns (e.g. shorting BTC's Oct-2023 +28% rally).
+        if (ANTI_TREND_GUARD and not special and direction == "SHORT"
+                and adx_val is not None and pdi_val is not None and ndi_val is not None
+                and adx_val >= ANTI_TREND_ADX_MIN and pdi_val > ndi_val):
+            logger.debug("SHORT пропущен: сильный аптренд ADX=%.1f +DI=%.1f > -DI=%.1f",
+                         adx_val, pdi_val, ndi_val)
+            continue
 
         if not special and direction == "LONG" and LONG_MIN_CONFLUENCE > 0:
             if lvl.get("confluence_score", 0) < LONG_MIN_CONFLUENCE:

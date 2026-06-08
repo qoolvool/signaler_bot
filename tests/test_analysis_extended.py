@@ -467,3 +467,64 @@ class TestAdaptiveSlCap:
         current = float(df["close"].iloc[-1])
         sigs = self._signals(df, current, macro_trend="DOWN")
         assert any(s["direction"] == "LONG" for s in sigs)
+
+
+# ── Anti-trend guard: blocks SHORTs in strong uptrends ────────────────────────
+
+class TestAntiTrendGuard:
+    """SHORT entries should be rejected when ADX is high and +DI dominates
+    (a strong, established uptrend) — the exact setup behind the bot's worst
+    drawdowns (e.g. shorting into BTC's October-2023 +28% rally)."""
+
+    def _downtrend_df(self, n=300):
+        closes = [float(130 - i * 0.1) for i in range(n)]
+        return make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+
+    def _signals(self, df, current, adx_val, pdi_val, ndi_val):
+        levels = [
+            {"price": round(current * 1.001, 2), "type": "RESISTANCE", "touches": 5,
+             "confluence_score": 3, "confluence_tags": ["EMA21", "FVG", "HTF_SR"]},
+            {"price": round(current * 0.85, 2), "type": "SUPPORT", "touches": 3,
+             "confluence_score": 0, "confluence_tags": []},
+        ]
+        return an.find_entry_signals(
+            df, levels, current_price=current,
+            htf_structure="BEARISH", adx_val=adx_val, adx_min=20.0,
+            ema_period=50, regime="NORMAL", htf_rsi=40.0,
+            sl_atr_mult=1.0, pdi_val=pdi_val, ndi_val=ndi_val,
+        )
+
+    def setup_method(self):
+        self._orig_guard   = an.ANTI_TREND_GUARD
+        self._orig_adx_min = an.ANTI_TREND_ADX_MIN
+        an.ANTI_TREND_GUARD   = True
+        an.ANTI_TREND_ADX_MIN = 40.0
+
+    def teardown_method(self):
+        an.ANTI_TREND_GUARD   = self._orig_guard
+        an.ANTI_TREND_ADX_MIN = self._orig_adx_min
+
+    def test_short_blocked_in_strong_uptrend(self):
+        df = self._downtrend_df()
+        current = float(df["close"].iloc[-1])
+        sigs = self._signals(df, current, adx_val=45.0, pdi_val=30.0, ndi_val=15.0)
+        assert all(s["direction"] != "SHORT" for s in sigs)
+
+    def test_short_allowed_when_downtrend_dominates(self):
+        df = self._downtrend_df()
+        current = float(df["close"].iloc[-1])
+        sigs = self._signals(df, current, adx_val=45.0, pdi_val=15.0, ndi_val=30.0)
+        assert any(s["direction"] == "SHORT" for s in sigs)
+
+    def test_short_allowed_when_adx_below_threshold(self):
+        df = self._downtrend_df()
+        current = float(df["close"].iloc[-1])
+        sigs = self._signals(df, current, adx_val=25.0, pdi_val=30.0, ndi_val=15.0)
+        assert any(s["direction"] == "SHORT" for s in sigs)
+
+    def test_guard_disabled_allows_short(self):
+        an.ANTI_TREND_GUARD = False
+        df = self._downtrend_df()
+        current = float(df["close"].iloc[-1])
+        sigs = self._signals(df, current, adx_val=45.0, pdi_val=30.0, ndi_val=15.0)
+        assert any(s["direction"] == "SHORT" for s in sigs)

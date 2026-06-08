@@ -350,8 +350,12 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
         _mark_htf_confirmed(levels, htf_sr, TOLERANCE_PERCENT)
     # Compute ADX series once — reused by find_entry_signals choppy filter
     adx_s, pdi_s, ndi_s = _calc_adx_series(df_1h, ADX_PERIOD)
-    adx_val   = (float(adx_s.iloc[-1]), float(pdi_s.iloc[-1]), float(ndi_s.iloc[-1])) if not adx_s.empty else (None, None, None)
-    adx_val   = adx_val[0]
+    if not adx_s.empty:
+        adx_val = float(adx_s.iloc[-1])
+        pdi_val = float(pdi_s.iloc[-1])
+        ndi_val = float(ndi_s.iloc[-1])
+    else:
+        adx_val = pdi_val = ndi_val = None
     rsi_series = _calc_rsi_series(df_1h, RSI_PERIOD)
     atr_ratio  = _calc_atr_ratio(df_1h, ATR_PERIOD)
     regime     = _detect_regime(rsi_series, atr_ratio)
@@ -369,7 +373,7 @@ def _analyse_pair_worker(args: Tuple) -> Tuple:
         crash_low=crash_low, pump_high=pump_high,
         htf_structure=htf_structure, rsi_series=rsi_series, htf_rsi=htf_rsi,
         atr_ratio=atr_ratio, adx_series=adx_s, htf_below_ema=htf_below_ema,
-        macro_trend=macro_trend,
+        macro_trend=macro_trend, pdi_val=pdi_val, ndi_val=ndi_val,
     )
     returns = df_1h["close"].pct_change().dropna().tail(CORR_LOOKBACK)
     return pair, signals, returns

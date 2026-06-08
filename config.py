@@ -62,6 +62,15 @@ HTF_EMA_PERIOD = int(os.getenv("HTF_EMA_PERIOD", "50"))
 ADX_PERIOD     = int(os.getenv("ADX_PERIOD", "14"))
 ADX_MIN        = float(os.getenv("ADX_MIN", "20"))
 
+# Anti-trend guard: block SHORT entries during a strong, established uptrend
+# (ADX above threshold and +DI > -DI). Backtests show shorts opened into strong
+# rallies (e.g. Oct-2023 +28% BTC, Nov-2020, Mar-2021) drove the worst drawdowns
+# and weeks — this blocks exactly that failure mode. LONGs are left untouched
+# since the bot's edge is mean-reversion shorting into resistance during chop/
+# downtrends, where this guard never triggers.
+ANTI_TREND_GUARD   = os.getenv("ANTI_TREND_GUARD", "true").lower() == "true"
+ANTI_TREND_ADX_MIN = float(os.getenv("ANTI_TREND_ADX_MIN", "40"))
+
 # Macro trend (daily EMA200): used as an input for adaptive SL sizing — not a
 # signal gate (ablation showed a hard macro gate is redundant with the Layer-1
 # HTF-structure check and yields zero PnL difference when removed).
