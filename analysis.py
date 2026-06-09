@@ -25,7 +25,6 @@ from config import (
     STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
     QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
     ADAPTIVE_SL, MAX_SL_PERCENT_BEAR, MACRO_EMA_PERIOD, TREND_ALIGN,
-    REGIME_SIZING, REGIME_ADVERSE_MULT,
 )
 from indicators import (
     _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series,
@@ -730,15 +729,6 @@ def find_entry_signals(
             _calc_quality_mult(lvl, rr, lvl.get("htf_confirmed", False), divergence)
             if QUALITY_SIZING else 1.0
         )
-
-        # Regime-aware sizing: halve position for adverse-macro or unknown-macro trades.
-        # Applies to all regimes so RECOVERY LONGs on young tokens (macro=None) are reduced.
-        if REGIME_SIZING and (
-            (macro_trend == "DOWN" and direction == "LONG")
-            or (macro_trend == "UP" and direction == "SHORT")
-            or macro_trend is None
-        ):
-            quality_mult = round(quality_mult * REGIME_ADVERSE_MULT, 2)
 
         signals.append({
             "direction":         direction,
