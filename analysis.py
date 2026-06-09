@@ -594,10 +594,14 @@ def find_entry_signals(
         if SHORT_ONLY and direction == "LONG":
             continue
 
-        if TREND_ALIGN and not special and macro_trend is not None:
-            if macro_trend == "DOWN" and direction == "LONG":
-                continue
-            if macro_trend == "UP" and direction == "SHORT":
+        if TREND_ALIGN:
+            if not special and macro_trend is not None:
+                if macro_trend == "DOWN" and direction == "LONG":
+                    continue
+                if macro_trend == "UP" and direction == "SHORT":
+                    continue
+            if special and macro_trend is None:
+                # Skip crash/pump bounces on tokens with no macro history (<200 trading days)
                 continue
 
         if not special and direction == "LONG" and LONG_MIN_CONFLUENCE > 0:
