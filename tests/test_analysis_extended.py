@@ -434,20 +434,23 @@ class TestAdaptiveSlCap:
         )
 
     def setup_method(self):
-        self._orig_adaptive = an.ADAPTIVE_SL
-        self._orig_max      = an.MAX_SL_PERCENT
-        self._orig_bear     = an.MAX_SL_PERCENT_BEAR
-        self._orig_struct   = an.STRUCTURAL_SL
-        an.ADAPTIVE_SL        = True
-        an.MAX_SL_PERCENT     = 3.5
+        self._orig_adaptive     = an.ADAPTIVE_SL
+        self._orig_max          = an.MAX_SL_PERCENT
+        self._orig_bear         = an.MAX_SL_PERCENT_BEAR
+        self._orig_struct       = an.STRUCTURAL_SL
+        self._orig_trend_align  = an.TREND_ALIGN
+        an.ADAPTIVE_SL         = True
+        an.MAX_SL_PERCENT      = 3.5
         an.MAX_SL_PERCENT_BEAR = 2.0
-        an.STRUCTURAL_SL      = False
+        an.STRUCTURAL_SL       = False
+        an.TREND_ALIGN         = False  # isolate: test only ADAPTIVE_SL behaviour
 
     def teardown_method(self):
         an.ADAPTIVE_SL         = self._orig_adaptive
         an.MAX_SL_PERCENT      = self._orig_max
         an.MAX_SL_PERCENT_BEAR = self._orig_bear
         an.STRUCTURAL_SL       = self._orig_struct
+        an.TREND_ALIGN         = self._orig_trend_align
 
     def test_wide_sl_rejected_in_macro_downtrend(self):
         df = self._trending_df()

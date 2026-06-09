@@ -62,9 +62,7 @@ HTF_EMA_PERIOD = int(os.getenv("HTF_EMA_PERIOD", "50"))
 ADX_PERIOD     = int(os.getenv("ADX_PERIOD", "14"))
 ADX_MIN        = float(os.getenv("ADX_MIN", "20"))
 
-# Macro trend (daily EMA200): used as an input for adaptive SL sizing — not a
-# signal gate (ablation showed a hard macro gate is redundant with the Layer-1
-# HTF-structure check and yields zero PnL difference when removed).
+# Macro trend (daily EMA200): used for adaptive SL sizing and trend-alignment gate.
 # Computed by resampling already-downloaded 4h data to daily — no extra API call.
 MACRO_EMA_PERIOD   = int(os.getenv("MACRO_EMA_PERIOD", "200"))
 
@@ -96,6 +94,11 @@ MAX_SL_PERCENT           = float(os.getenv("MAX_SL_PERCENT", "3.5"))
 # bull regimes (-$264 in 2023) — so the cap is widened/tightened by macro_trend.
 ADAPTIVE_SL              = os.getenv("ADAPTIVE_SL", "true").lower() == "true"
 MAX_SL_PERCENT_BEAR      = float(os.getenv("MAX_SL_PERCENT_BEAR", "2.0"))
+# Trend-alignment gate: skip LONGs when daily close < EMA200 (macro downtrend),
+# skip SHORTs when daily close > EMA200 (macro uptrend). Symmetric — both
+# directions remain active, each only fires in its favourable macro context.
+# Recovery/correction special regimes are exempt (crash/pump bounces still fire).
+TREND_ALIGN              = os.getenv("TREND_ALIGN", "true").lower() == "true"
 LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "3"))
 # Disable LONG entries entirely. Over 2022-2024 LONGs produced essentially
 # zero net PnL (-$6.36 total) while concentrating losses in the worst months

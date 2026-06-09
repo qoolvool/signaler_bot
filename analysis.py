@@ -24,7 +24,7 @@ from config import (
     MAX_SL_PERCENT, LONG_MIN_CONFLUENCE, LONG_HTF_RSI_MIN, HTF_BELOW_EMA_MAX,
     STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
     QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
-    ADAPTIVE_SL, MAX_SL_PERCENT_BEAR, MACRO_EMA_PERIOD,
+    ADAPTIVE_SL, MAX_SL_PERCENT_BEAR, MACRO_EMA_PERIOD, TREND_ALIGN,
 )
 from indicators import (
     _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series,
@@ -593,6 +593,12 @@ def find_entry_signals(
 
         if SHORT_ONLY and direction == "LONG":
             continue
+
+        if TREND_ALIGN and not special and macro_trend is not None:
+            if macro_trend == "DOWN" and direction == "LONG":
+                continue
+            if macro_trend == "UP" and direction == "SHORT":
+                continue
 
         if not special and direction == "LONG" and LONG_MIN_CONFLUENCE > 0:
             if lvl.get("confluence_score", 0) < LONG_MIN_CONFLUENCE:
