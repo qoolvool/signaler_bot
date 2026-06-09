@@ -99,6 +99,13 @@ MAX_SL_PERCENT_BEAR      = float(os.getenv("MAX_SL_PERCENT_BEAR", "2.0"))
 # directions remain active, each only fires in its favourable macro context.
 # Recovery/correction special regimes are exempt (crash/pump bounces still fire).
 TREND_ALIGN              = os.getenv("TREND_ALIGN", "true").lower() == "true"
+# Regime-aware position sizing: scale down trades that go against the macro trend
+# instead of blocking them. Applies to all regimes including RECOVERY/CORRECTION.
+# Cases that get REGIME_ADVERSE_MULT: LONG in macro DOWN, SHORT in macro UP,
+# and any trade where macro_trend is None (new token, <200 days of data).
+# Set REGIME_ADVERSE_MULT=1.0 to effectively disable scaling while keeping the flag.
+REGIME_SIZING            = os.getenv("REGIME_SIZING", "true").lower() == "true"
+REGIME_ADVERSE_MULT      = float(os.getenv("REGIME_ADVERSE_MULT", "0.5"))
 LONG_MIN_CONFLUENCE      = int(os.getenv("LONG_MIN_CONFLUENCE", "3"))
 # Disable LONG entries entirely. Over 2022-2024 LONGs produced essentially
 # zero net PnL (-$6.36 total) while concentrating losses in the worst months

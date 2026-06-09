@@ -470,3 +470,84 @@ class TestAdaptiveSlCap:
         current = float(df["close"].iloc[-1])
         sigs = self._signals(df, current, macro_trend="DOWN")
         assert any(s["direction"] == "LONG" for s in sigs)
+
+
+# ── Regime-aware position sizing ──────────────────────────────────────────────
+
+class TestRegimeSizing:
+    """REGIME_SIZING scales quality_mult for adverse-macro and unknown-macro trades."""
+
+    def _df(self, n=300):
+        closes = [100.0 + i * 0.1 for i in range(n)]
+        return make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+
+    def _get_long_mult(self, macro_trend):
+        """Return quality_mult of the first LONG signal for given macro_trend."""
+        df = self._df()
+        current = float(df["close"].iloc[-1])
+        levels = [
+            {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
+             "confluence_score": 2, "confluence_tags": ["EMA21", "FVG"]},
+            {"price": round(current * 1.10, 2),  "type": "RESISTANCE", "touches": 3,
+             "confluence_score": 0, "confluence_tags": []},
+        ]
+        sigs = an.find_entry_signals(
+            df, levels, current_price=current,
+            htf_structure="BULLISH", adx_val=30.0, ema_period=50,
+            htf_rsi=60.0, htf_below_ema=0, macro_trend=macro_trend,
+        )
+        long_sigs = [s for s in sigs if s["direction"] == "LONG"]
+        return long_sigs[0]["quality_mult"] if long_sigs else None
+
+    def setup_method(self):
+        self._orig_regime      = an.REGIME_SIZING
+        self._orig_mult        = an.REGIME_ADVERSE_MULT
+        self._orig_trend       = an.TREND_ALIGN
+        self._orig_qual        = an.QUALITY_SIZING
+        self._orig_rsi         = an.REQUIRE_RSI_DIVERGENCE
+        self._orig_long_min    = an.LONG_MIN_CONFLUENCE
+        self._orig_adaptive    = an.ADAPTIVE_SL
+        an.TREND_ALIGN         = False  # isolate: don't block, only scale
+        an.REGIME_SIZING       = True
+        an.REGIME_ADVERSE_MULT = 0.5
+        an.QUALITY_SIZING      = True
+        an.REQUIRE_RSI_DIVERGENCE = False
+        an.LONG_MIN_CONFLUENCE = 0  # don't gate LONG by confluence here
+        an.ADAPTIVE_SL         = False  # isolate: ADAPTIVE_SL also uses macro_trend
+
+    def teardown_method(self):
+        an.REGIME_SIZING       = self._orig_regime
+        an.REGIME_ADVERSE_MULT = self._orig_mult
+        an.TREND_ALIGN         = self._orig_trend
+        an.QUALITY_SIZING      = self._orig_qual
+        an.REQUIRE_RSI_DIVERGENCE = self._orig_rsi
+        an.LONG_MIN_CONFLUENCE = self._orig_long_min
+        an.ADAPTIVE_SL         = self._orig_adaptive
+
+    def test_long_in_down_macro_gets_halved(self):
+        mult_down = self._get_long_mult(macro_trend="DOWN")
+        mult_up   = self._get_long_mult(macro_trend="UP")
+        assert mult_down is not None, "LONG signal expected in DOWN macro (TREND_ALIGN=False)"
+        assert mult_up   is not None, "LONG signal expected in UP macro"
+        assert abs(mult_down - mult_up * 0.5) < 0.01
+
+    def test_long_with_none_macro_gets_halved(self):
+        mult_none = self._get_long_mult(macro_trend=None)
+        mult_up   = self._get_long_mult(macro_trend="UP")
+        assert mult_none is not None, "LONG signal expected with macro=None"
+        assert mult_up   is not None
+        assert abs(mult_none - mult_up * 0.5) < 0.01
+
+    def test_long_in_up_macro_not_reduced(self):
+        mult_up_a = self._get_long_mult(macro_trend="UP")
+        mult_up_b = self._get_long_mult(macro_trend="UP")
+        assert mult_up_a is not None
+        assert mult_up_a == mult_up_b
+
+    def test_regime_sizing_disabled_no_scaling(self):
+        an.REGIME_SIZING = False
+        mult_down = self._get_long_mult(macro_trend="DOWN")
+        mult_up   = self._get_long_mult(macro_trend="UP")
+        assert mult_down is not None, "LONG signal expected when REGIME_SIZING=False"
+        assert mult_up   is not None
+        assert mult_down == mult_up  # no difference when disabled
