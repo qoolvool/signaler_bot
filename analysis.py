@@ -25,6 +25,7 @@ from config import (
     STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
     QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
     ADAPTIVE_SL, MAX_SL_PERCENT_BEAR, MACRO_EMA_PERIOD, TREND_ALIGN,
+    ATR_VOL_SCALING, ATR_VOL_SCALE_FLOOR,
 )
 from indicators import (
     _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series,
@@ -729,6 +730,11 @@ def find_entry_signals(
             _calc_quality_mult(lvl, rr, lvl.get("htf_confirmed", False), divergence)
             if QUALITY_SIZING else 1.0
         )
+
+        # ATR volatility scaling: shrink position when current ATR exceeds its
+        # historical average. Protects capital during volatile/crash periods.
+        if ATR_VOL_SCALING and atr_ratio > 1.0:
+            quality_mult = round(max(quality_mult / atr_ratio, ATR_VOL_SCALE_FLOOR), 2)
 
         signals.append({
             "direction":         direction,
