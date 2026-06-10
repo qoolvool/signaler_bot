@@ -193,9 +193,11 @@ class TestMinConfluenceScoreFilter:
         orig_rsi   = an.REQUIRE_RSI_DIVERGENCE
         orig_score = an.MIN_CONFLUENCE_SCORE
         orig_long  = an.LONG_MIN_CONFLUENCE
+        orig_choch = an.REQUIRE_CHOCH_CONFIRM
         an.REQUIRE_RSI_DIVERGENCE = False
         an.MIN_CONFLUENCE_SCORE   = 0
         an.LONG_MIN_CONFLUENCE    = 0
+        an.REQUIRE_CHOCH_CONFIRM  = False
         df      = self._bullish_df()
         current = float(df["close"].iloc[-1])
         levels  = [
@@ -211,6 +213,7 @@ class TestMinConfluenceScoreFilter:
         an.REQUIRE_RSI_DIVERGENCE = orig_rsi
         an.MIN_CONFLUENCE_SCORE   = orig_score
         an.LONG_MIN_CONFLUENCE    = orig_long
+        an.REQUIRE_CHOCH_CONFIRM  = orig_choch
         assert len(sigs) >= 1
 
     def test_confluence_filter_bypassed_in_recovery(self):
@@ -244,7 +247,9 @@ class TestHtfRsiPassthrough:
     def test_none_htf_rsi_does_not_block(self):
         """When htf_rsi is None, the 4h RSI gate is skipped entirely."""
         orig = an.REQUIRE_RSI_DIVERGENCE
+        orig_choch = an.REQUIRE_CHOCH_CONFIRM
         an.REQUIRE_RSI_DIVERGENCE = False
+        an.REQUIRE_CHOCH_CONFIRM = False
         closes = [100.0 + i * 0.1 for i in range(300)]
         df = make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
         current = float(df["close"].iloc[-1])
@@ -260,6 +265,7 @@ class TestHtfRsiPassthrough:
             htf_rsi=None,
         )
         an.REQUIRE_RSI_DIVERGENCE = orig
+        an.REQUIRE_CHOCH_CONFIRM = orig_choch
         assert len(sigs) >= 1
 
 
@@ -297,8 +303,10 @@ class TestChoppyAtrRatioFilter:
         """atr_ratio above CHOPPY_ATR_MIN should not suppress signals."""
         orig_rsi = an.REQUIRE_RSI_DIVERGENCE
         orig_min = an.CHOPPY_ATR_MIN
+        orig_choch = an.REQUIRE_CHOCH_CONFIRM
         an.REQUIRE_RSI_DIVERGENCE = False
         an.CHOPPY_ATR_MIN = 0.75
+        an.REQUIRE_CHOCH_CONFIRM = False
         df = self._bullish_df()
         current = float(df["close"].iloc[-1])
         levels = [
@@ -314,6 +322,7 @@ class TestChoppyAtrRatioFilter:
         )
         an.REQUIRE_RSI_DIVERGENCE = orig_rsi
         an.CHOPPY_ATR_MIN = orig_min
+        an.REQUIRE_CHOCH_CONFIRM = orig_choch
         assert len(sigs) >= 1
 
 
@@ -439,11 +448,13 @@ class TestAdaptiveSlCap:
         self._orig_bear         = an.MAX_SL_PERCENT_BEAR
         self._orig_struct       = an.STRUCTURAL_SL
         self._orig_trend_align  = an.TREND_ALIGN
+        self._orig_choch        = an.REQUIRE_CHOCH_CONFIRM
         an.ADAPTIVE_SL         = True
         an.MAX_SL_PERCENT      = 3.5
         an.MAX_SL_PERCENT_BEAR = 2.0
         an.STRUCTURAL_SL       = False
         an.TREND_ALIGN         = False  # isolate: test only ADAPTIVE_SL behaviour
+        an.REQUIRE_CHOCH_CONFIRM = False
 
     def teardown_method(self):
         an.ADAPTIVE_SL         = self._orig_adaptive
@@ -451,6 +462,7 @@ class TestAdaptiveSlCap:
         an.MAX_SL_PERCENT_BEAR = self._orig_bear
         an.STRUCTURAL_SL       = self._orig_struct
         an.TREND_ALIGN         = self._orig_trend_align
+        an.REQUIRE_CHOCH_CONFIRM = self._orig_choch
 
     def test_wide_sl_rejected_in_macro_downtrend(self):
         df = self._trending_df()
@@ -470,3 +482,95 @@ class TestAdaptiveSlCap:
         current = float(df["close"].iloc[-1])
         sigs = self._signals(df, current, macro_trend="DOWN")
         assert any(s["direction"] == "LONG" for s in sigs)
+
+
+class TestChochConfirmation:
+    """CHoCH/BOS confirmation: the last close must already have broken beyond
+    the most recent minor swing point in the trade direction."""
+
+    def _long_breakout_df(self):
+        # Rising, then a pullback forming a swing high, then a final candle
+        # that closes above that swing high — confirms structure break up.
+        closes = [100 + i for i in range(15)]            # idx 0-14: 100..114
+        highs  = [c + 1 for c in closes]
+        closes.append(116); highs.append(118)            # idx 15: swing high
+        for i in range(1, 10):                           # idx 16-24: pullback
+            closes.append(116 - i); highs.append(closes[-1] + 2)
+        for i in range(1, 10):                           # idx 25-33: recovery
+            closes.append(107 + i); highs.append(closes[-1] + 2)
+        closes.append(119); highs.append(121)            # idx 34: breakout close
+        lows = [c - 2 for c in closes]
+        return make_df(closes, highs=highs, lows=lows)
+
+    def _monotonic_df(self, n=35):
+        closes = [100 + i for i in range(n)]
+        return make_df(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+
+    def _short_breakout_df(self):
+        # Mirror of the LONG case: falling, then a bounce forming a swing low,
+        # then a final candle that closes below that swing low.
+        closes = [200 - i for i in range(15)]            # idx 0-14: 200..186
+        lows   = [c - 1 for c in closes]
+        closes.append(184); lows.append(182)             # idx 15: swing low
+        for i in range(1, 10):                           # idx 16-24: bounce
+            closes.append(184 + i); lows.append(closes[-1] - 2)
+        for i in range(1, 10):                           # idx 25-33: decline
+            closes.append(193 - i); lows.append(closes[-1] - 2)
+        closes.append(181); lows.append(179)             # idx 34: breakdown close
+        highs = [c + 2 for c in closes]
+        return make_df(closes, highs=highs, lows=lows)
+
+    def test_long_confirmed_after_breaking_swing_high(self):
+        df = self._long_breakout_df()
+        assert an._detect_structure_break(df, "LONG") is True
+
+    def test_long_not_confirmed_without_recent_swing(self):
+        df = self._monotonic_df()
+        assert an._detect_structure_break(df, "LONG") is False
+
+    def test_short_confirmed_after_breaking_swing_low(self):
+        df = self._short_breakout_df()
+        assert an._detect_structure_break(df, "SHORT") is True
+
+    def test_insufficient_data_returns_false(self):
+        df = self._monotonic_df(n=10)
+        assert an._detect_structure_break(df, "LONG") is False
+        assert an._detect_structure_break(df, "SHORT") is False
+
+    def setup_method(self):
+        self._orig_choch       = an.REQUIRE_CHOCH_CONFIRM
+        self._orig_adaptive    = an.ADAPTIVE_SL
+        self._orig_trend_align = an.TREND_ALIGN
+        an.ADAPTIVE_SL  = False
+        an.TREND_ALIGN  = False
+
+    def teardown_method(self):
+        an.REQUIRE_CHOCH_CONFIRM = self._orig_choch
+        an.ADAPTIVE_SL           = self._orig_adaptive
+        an.TREND_ALIGN           = self._orig_trend_align
+
+    def _signals(self, df, current):
+        levels = [
+            {"price": round(current * 0.999, 2), "type": "SUPPORT", "touches": 5,
+             "confluence_score": 3, "confluence_tags": ["EMA21", "FVG", "HTF_SR"]},
+            {"price": round(current + 10, 2), "type": "RESISTANCE", "touches": 3,
+             "confluence_score": 0, "confluence_tags": []},
+        ]
+        return an.find_entry_signals(
+            df, levels, current_price=current,
+            htf_structure="BULLISH", adx_val=30.0, adx_min=20.0,
+            ema_period=50, regime="NORMAL", htf_rsi=60.0, htf_below_ema=0,
+            sl_atr_mult=1.05, macro_trend="UP",
+        )
+
+    def test_signal_blocked_without_structure_break_when_required(self):
+        an.REQUIRE_CHOCH_CONFIRM = True
+        df = self._monotonic_df(n=60)
+        current = float(df["close"].iloc[-1])
+        assert self._signals(df, current) == []
+
+    def test_signal_allowed_without_structure_break_when_not_required(self):
+        an.REQUIRE_CHOCH_CONFIRM = False
+        df = self._monotonic_df(n=60)
+        current = float(df["close"].iloc[-1])
+        assert any(s["direction"] == "LONG" for s in self._signals(df, current))
