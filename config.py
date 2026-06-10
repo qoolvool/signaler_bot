@@ -114,12 +114,6 @@ STRUCTURAL_SL_LOOKBACK   = int(os.getenv("STRUCTURAL_SL_LOOKBACK", "20"))
 QUALITY_SIZING           = os.getenv("QUALITY_SIZING", "true").lower() == "true"
 QUALITY_MULT_MIN         = float(os.getenv("QUALITY_MULT_MIN", "0.8"))
 QUALITY_MULT_MAX         = float(os.getenv("QUALITY_MULT_MAX", "2.0"))
-# ATR volatility scaling: reduce position size when current ATR is above its
-# historical average. quality_mult is divided by atr_ratio when atr_ratio > 1.
-# atr_ratio=1.5 → ×0.67; atr_ratio=2.0 → ×0.50. ATR_VOL_SCALE_FLOOR caps the
-# minimum so even extreme spikes don't shrink positions below this fraction.
-ATR_VOL_SCALING          = os.getenv("ATR_VOL_SCALING", "true").lower() == "true"
-ATR_VOL_SCALE_FLOOR      = float(os.getenv("ATR_VOL_SCALE_FLOOR", "0.4"))
 
 TRAILING_STOP = os.getenv("TRAILING_STOP", "true").lower() == "true"
 TRAILING_MULT = float(os.getenv("TRAILING_MULT", "1.2"))
