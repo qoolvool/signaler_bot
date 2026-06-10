@@ -63,6 +63,11 @@ class PaperPortfolio:
         max_trade_size_percent: float = 20.0,
         trailing_stop: bool = False,
         trailing_mult: float = 1.0,
+        kelly_sizing: bool = False,
+        kelly_fraction: float = 0.5,
+        kelly_lookback_trades: int = 30,
+        kelly_mult_min: float = 0.5,
+        kelly_mult_max: float = 1.5,
     ):
         self.initial_balance        = initial_balance
         self.trade_size_percent     = trade_size_percent
@@ -77,6 +82,11 @@ class PaperPortfolio:
         self.max_trade_size_percent = max_trade_size_percent
         self.trailing_stop          = trailing_stop
         self.trailing_mult          = trailing_mult
+        self.kelly_sizing           = kelly_sizing
+        self.kelly_fraction         = kelly_fraction
+        self.kelly_lookback_trades  = kelly_lookback_trades
+        self.kelly_mult_min         = kelly_mult_min
+        self.kelly_mult_max         = kelly_mult_max
 
         self.balance: float             = initial_balance
         self.trades: List[Dict]         = []
@@ -341,6 +351,26 @@ class PaperPortfolio:
     def closed_trades(self) -> List[Dict]:
         return [t for t in self.trades if t["status"] == "CLOSED"]
 
+    def kelly_mult(self) -> float:
+        """Fractional-Kelly position-size multiplier from recent trade edge."""
+        if not self.kelly_sizing:
+            return 1.0
+        recent = self.closed_trades[-self.kelly_lookback_trades:]
+        if len(recent) < self.kelly_lookback_trades:
+            return 1.0
+        wins   = [t["pnl_usd"] for t in recent if t["pnl_usd"] > 0]
+        losses = [t["pnl_usd"] for t in recent if t["pnl_usd"] <= 0]
+        if not wins or not losses:
+            return 1.0
+        win_rate = len(wins) / len(recent)
+        avg_win  = sum(wins) / len(wins)
+        avg_loss = abs(sum(losses) / len(losses))
+        if avg_loss <= 0:
+            return 1.0
+        kelly_f = win_rate - (1 - win_rate) / (avg_win / avg_loss)
+        mult = 1.0 + kelly_f * self.kelly_fraction
+        return round(min(max(mult, self.kelly_mult_min), self.kelly_mult_max), 2)
+
     def has_open_trade(self, pair: str, direction: str) -> bool:
         return any(
             t["pair"] == pair and t["direction"] == direction
@@ -382,6 +412,8 @@ class PaperPortfolio:
         if direction == "SHORT" and tp >= entry_price:
             logger.warning("SHORT TP %.8f >= entry %.8f (%s) — пропускаем", tp, entry_price, pair)
             return None
+
+        risk_mult *= self.kelly_mult()
 
         sl_pct = abs(entry_price - sl) / entry_price
         if self.fixed_risk_mode and sl_pct > 0 and self.leverage > 0:

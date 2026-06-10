@@ -404,3 +404,53 @@ class TestGetStats:
     def test_equity_equals_balance_when_no_open_trades(self):
         p = _portfolio(initial_balance=500.0)
         assert p.get_equity({}) == 500.0
+
+
+# ── kelly_mult ──────────────────────────────────────────────────────────────────
+
+class TestKellyMult:
+    def _add_closed(self, p, pnls):
+        for pnl in pnls:
+            p.trades.append({"status": "CLOSED", "pnl_usd": pnl})
+
+    def test_disabled_returns_one(self):
+        p = _portfolio(kelly_sizing=False)
+        self._add_closed(p, [10.0] * 30)
+        assert p.kelly_mult() == 1.0
+
+    def test_insufficient_history_returns_one(self):
+        p = _portfolio(kelly_sizing=True, kelly_lookback_trades=30)
+        self._add_closed(p, [10.0] * 10)
+        assert p.kelly_mult() == 1.0
+
+    def test_positive_edge_increases_mult(self):
+        # 60% win rate, avg win 10, avg loss 5 → kelly_f = 0.6 - 0.4/2 = 0.4
+        # mult = 1 + 0.4 * 0.5 = 1.2
+        p = _portfolio(kelly_sizing=True, kelly_lookback_trades=10,
+                       kelly_fraction=0.5, kelly_mult_min=0.5, kelly_mult_max=1.5)
+        self._add_closed(p, [10.0] * 6 + [-5.0] * 4)
+        assert p.kelly_mult() == pytest.approx(1.2, abs=0.01)
+
+    def test_negative_edge_decreases_mult(self):
+        # 30% win rate, avg win 5, avg loss 10 → kelly_f = 0.3 - 0.7/0.5 = -1.1
+        # mult = 1 + (-1.1) * 0.5 = 0.45 → clamped to mult_min
+        p = _portfolio(kelly_sizing=True, kelly_lookback_trades=10,
+                       kelly_fraction=0.5, kelly_mult_min=0.5, kelly_mult_max=1.5)
+        self._add_closed(p, [5.0] * 3 + [-10.0] * 7)
+        assert p.kelly_mult() == 0.5
+
+    def test_only_recent_lookback_window_used(self):
+        # Old losing trades fall outside the lookback window and are ignored
+        p = _portfolio(kelly_sizing=True, kelly_lookback_trades=10,
+                       kelly_fraction=0.5, kelly_mult_min=0.5, kelly_mult_max=1.5)
+        self._add_closed(p, [-10.0] * 20 + [10.0] * 6 + [-5.0] * 4)
+        assert p.kelly_mult() == pytest.approx(1.2, abs=0.01)
+
+    def test_create_pending_order_scales_size_by_kelly_mult(self):
+        p = _portfolio(kelly_sizing=True, kelly_lookback_trades=10,
+                       kelly_fraction=0.5, kelly_mult_min=0.5, kelly_mult_max=1.5,
+                       fixed_risk_mode=True, risk_per_trade_percent=1.0,
+                       max_trade_size_percent=100.0)
+        self._add_closed(p, [10.0] * 6 + [-5.0] * 4)  # kelly_mult == 1.2
+        o = p.create_pending_order("BTC/USDT", "LONG", 100.0, sl=90.0, tp=200.0)
+        assert o["size_usd"] == pytest.approx(100.0 * 1.2, rel=0.01)

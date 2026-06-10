@@ -115,6 +115,17 @@ QUALITY_SIZING           = os.getenv("QUALITY_SIZING", "true").lower() == "true"
 QUALITY_MULT_MIN         = float(os.getenv("QUALITY_MULT_MIN", "0.8"))
 QUALITY_MULT_MAX         = float(os.getenv("QUALITY_MULT_MAX", "2.0"))
 
+# Fractional Kelly sizing: scale position size up/down based on the recent
+# trade edge. Kelly fraction f = win_rate - (1-win_rate)/(avg_win/avg_loss)
+# over the last KELLY_LOOKBACK_TRADES closed trades; multiplier = 1 + f *
+# KELLY_FRACTION, clamped to [KELLY_MULT_MIN, KELLY_MULT_MAX]. Multiplies the
+# existing risk_mult (quality_mult), so it scales positions on top of it.
+KELLY_SIZING             = os.getenv("KELLY_SIZING", "true").lower() == "true"
+KELLY_FRACTION           = float(os.getenv("KELLY_FRACTION", "0.5"))
+KELLY_LOOKBACK_TRADES    = int(os.getenv("KELLY_LOOKBACK_TRADES", "30"))
+KELLY_MULT_MIN           = float(os.getenv("KELLY_MULT_MIN", "0.5"))
+KELLY_MULT_MAX           = float(os.getenv("KELLY_MULT_MAX", "1.5"))
+
 TRAILING_STOP = os.getenv("TRAILING_STOP", "true").lower() == "true"
 TRAILING_MULT = float(os.getenv("TRAILING_MULT", "1.2"))
 

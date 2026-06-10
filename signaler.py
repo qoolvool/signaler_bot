@@ -105,6 +105,11 @@ portfolio = PaperPortfolio(
     max_trade_size_percent=MAX_TRADE_SIZE_PERCENT,
     trailing_stop=TRAILING_STOP,
     trailing_mult=TRAILING_MULT,
+    kelly_sizing=KELLY_SIZING,
+    kelly_fraction=KELLY_FRACTION,
+    kelly_lookback_trades=KELLY_LOOKBACK_TRADES,
+    kelly_mult_min=KELLY_MULT_MIN,
+    kelly_mult_max=KELLY_MULT_MAX,
 )
 
 # ============================================================

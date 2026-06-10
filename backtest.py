@@ -59,6 +59,7 @@ from config import (
     COMMISSION_MAKER, COMMISSION_TAKER, BREAKEVEN_THRESHOLD, TRAILING_STOP, TRAILING_MULT,
     BOUNCE_CONFIRM, FIXED_RISK_MODE, RISK_PER_TRADE_PERCENT,
     MAX_TRADE_SIZE_PERCENT, HTF_SR_CANDLES, HTF_SR_REQUIRE_CONFIRM,
+    KELLY_SIZING, KELLY_FRACTION, KELLY_LOOKBACK_TRADES, KELLY_MULT_MIN, KELLY_MULT_MAX,
     EMA_CONFLUENCE_PERIODS, FVG_LOOKBACK, FVG_MIN_GAP_PCT,
     MIN_CONFLUENCE_SCORE, HTF_RSI_OVERBOUGHT, HTF_RSI_OVERSOLD,
     INITIAL_BALANCE, LEVERAGE, PENDING_EXPIRY_CHECKS, MAX_OPEN_TRADES,
@@ -515,6 +516,11 @@ def phase2_simulate(
         max_trade_size_percent = MAX_TRADE_SIZE_PERCENT,
         trailing_stop          = TRAILING_STOP,
         trailing_mult          = TRAILING_MULT,
+        kelly_sizing           = KELLY_SIZING,
+        kelly_fraction         = KELLY_FRACTION,
+        kelly_lookback_trades  = KELLY_LOOKBACK_TRADES,
+        kelly_mult_min         = KELLY_MULT_MIN,
+        kelly_mult_max         = KELLY_MULT_MAX,
     )
 
     equity_log: List[Dict]       = []
