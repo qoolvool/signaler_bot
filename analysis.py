@@ -25,7 +25,6 @@ from config import (
     STRUCTURAL_SL, STRUCTURAL_SL_BUFFER, STRUCTURAL_SL_LOOKBACK,
     QUALITY_SIZING, QUALITY_MULT_MIN, QUALITY_MULT_MAX,
     ADAPTIVE_SL, MAX_SL_PERCENT_BEAR, MACRO_EMA_PERIOD, TREND_ALIGN,
-    REQUIRE_CHOCH_CONFIRM, CHOCH_WINDOW, CHOCH_LOOKBACK,
 )
 from indicators import (
     _calc_ema, _calc_atr, _calc_rsi_series, _calc_adx_series,
@@ -404,36 +403,6 @@ def _find_structural_sl(
         return min(candidates) * (1.0 + STRUCTURAL_SL_BUFFER / 100.0)
 
 
-def _detect_structure_break(
-    df: pd.DataFrame,
-    direction: str,
-    window: int = CHOCH_WINDOW,
-    lookback: int = CHOCH_LOOKBACK,
-) -> bool:
-    """CHoCH/BOS confirmation: has the last close already broken beyond the
-    most recent minor swing point in the trade direction?
-
-    For LONG, the last close must be above the most recent swing high; for
-    SHORT, below the most recent swing low. This confirms the bounce has
-    produced a real shift in market structure rather than a failed touch.
-    """
-    needed = lookback + window * 2 + 1
-    if len(df) < needed:
-        return False
-    recent     = df.iloc[-(lookback + window * 2):-1]
-    last_close = float(df["close"].iloc[-1])
-    if direction == "LONG":
-        swings = _find_local_extrema(recent["high"], window, "max")
-        if not swings:
-            return False
-        return last_close > swings[-1][0]
-    else:
-        swings = _find_local_extrema(recent["low"], window, "min")
-        if not swings:
-            return False
-        return last_close < swings[-1][0]
-
-
 def _calc_quality_mult(lvl: Dict, rr: float, htf_confirmed: bool, divergence: bool = False) -> float:
     """Множитель размера позиции по качеству сигнала [QUALITY_MULT_MIN, QUALITY_MULT_MAX]."""
     score = lvl.get("confluence_score", 0)
@@ -661,9 +630,6 @@ def find_entry_signals(
 
         pattern_confirmed = pattern in (_BULLISH_PATTERNS if direction == "LONG" else _BEARISH_PATTERNS)
         if not _layer3_passes(pattern_confirmed, vol_spike, special):
-            continue
-
-        if not special and REQUIRE_CHOCH_CONFIRM and not _detect_structure_break(df, direction):
             continue
 
         if recovery and crash_low is not None:

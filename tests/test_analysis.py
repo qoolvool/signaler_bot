@@ -444,9 +444,7 @@ class TestFindEntrySignals:
     def test_htf_rsi_allows_signal_in_valid_range(self):
         """Signal passes when 4h RSI is neutral (40–60)."""
         orig = an.REQUIRE_RSI_DIVERGENCE
-        orig_choch = an.REQUIRE_CHOCH_CONFIRM
         an.REQUIRE_RSI_DIVERGENCE = False
-        an.REQUIRE_CHOCH_CONFIRM = False
         df = self._bullish_df(300)
         current = float(df["close"].iloc[-1])
         levels = [
@@ -461,7 +459,6 @@ class TestFindEntrySignals:
             ema_period=50, regime="NORMAL", htf_rsi=50.0,
         )
         an.REQUIRE_RSI_DIVERGENCE = orig
-        an.REQUIRE_CHOCH_CONFIRM = orig_choch
         assert len(sigs) >= 1
 
     def test_adx_filter_blocks_ranging_market(self):
@@ -509,9 +506,7 @@ class TestFindEntrySignals:
     def test_long_signal_direction_matches_support(self):
         """Support level near current price in uptrend → LONG signal."""
         an_orig = an.REQUIRE_RSI_DIVERGENCE
-        an_orig_choch = an.REQUIRE_CHOCH_CONFIRM
         an.REQUIRE_RSI_DIVERGENCE = False
-        an.REQUIRE_CHOCH_CONFIRM = False
         df      = self._bullish_df(300)
         current = float(df["close"].iloc[-1])
         # level just below current; TP well above to satisfy tp_atr_min_mult
@@ -529,7 +524,6 @@ class TestFindEntrySignals:
             ema_period=50, regime="NORMAL",
         )
         an.REQUIRE_RSI_DIVERGENCE = an_orig
-        an.REQUIRE_CHOCH_CONFIRM = an_orig_choch
         long_sigs = [s for s in sigs if s["direction"] == "LONG"]
         assert len(long_sigs) >= 1
         assert long_sigs[0]["sl"] < long_sigs[0]["tp"]

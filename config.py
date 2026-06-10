@@ -115,14 +115,6 @@ QUALITY_SIZING           = os.getenv("QUALITY_SIZING", "true").lower() == "true"
 QUALITY_MULT_MIN         = float(os.getenv("QUALITY_MULT_MIN", "0.8"))
 QUALITY_MULT_MAX         = float(os.getenv("QUALITY_MULT_MAX", "2.0"))
 
-# CHoCH/BOS confirmation: require price to have already broken a recent minor
-# swing point in the trade direction (close beyond the last swing high for
-# LONG, below the last swing low for SHORT) before entering. Confirms the
-# bounce reflects a real shift in market structure rather than a failed touch.
-REQUIRE_CHOCH_CONFIRM    = os.getenv("REQUIRE_CHOCH_CONFIRM", "true").lower() == "true"
-CHOCH_WINDOW             = int(os.getenv("CHOCH_WINDOW", "3"))
-CHOCH_LOOKBACK           = int(os.getenv("CHOCH_LOOKBACK", "20"))
-
 TRAILING_STOP = os.getenv("TRAILING_STOP", "true").lower() == "true"
 TRAILING_MULT = float(os.getenv("TRAILING_MULT", "1.2"))
 
